@@ -31,6 +31,7 @@ describe('Lois typed tools', () => {
         'inspect_curriculum_options',
         'propose_timetable',
         'propose_scheme',
+        'apply_pending_plans',
       ]),
     );
   });
@@ -102,6 +103,17 @@ describe('AiStaffPermissionCheckerService', () => {
     void PermissionResource.STUDENTS;
   });
 
+  it('blocks teachers from applying pending plans', async () => {
+    await expect(
+      checker.assertLoisToolAllowed({
+        toolName: 'apply_pending_plans',
+        userRole: 'TEACHER',
+        userId: 'u1',
+        schoolId: 's1',
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
   it('blocks teachers from proposing timetables', async () => {
     await expect(
       checker.assertLoisToolAllowed({
@@ -165,5 +177,43 @@ describe('AiStaffPermissionCheckerService', () => {
         schoolId: 's1',
       }),
     ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('teachers get classroom and pedagogy workers only', async () => {
+    const workers = await checker.resolveAllowedWorkers({
+      userRole: 'TEACHER',
+      userId: 'u1',
+      schoolId: 's1',
+    });
+    expect(workers).toEqual(['classroom', 'pedagogy']);
+  });
+
+  it('omits curator (and other desks) for a bursar who can only list fee debtors', async () => {
+    const spy = jest.spyOn(checker, 'assertLoisToolAllowed').mockImplementation(async ({ toolName }) => {
+      if (toolName === 'list_fee_debtors') return;
+      throw new ForbiddenException('no');
+    });
+    const workers = await checker.resolveAllowedWorkers({
+      userRole: 'SCHOOL_ADMIN',
+      userId: 'u1',
+      schoolId: 's1',
+    });
+    expect(workers).toEqual(['finance']);
+    expect(workers).not.toContain('curator');
+    expect(workers).not.toContain('admissions');
+    expect(workers).not.toContain('pedagogy');
+    spy.mockRestore();
+  });
+
+  it('gives principals every admin worker including curator', async () => {
+    prisma.schoolAdmin.findFirst.mockResolvedValue({ id: 'a1', role: 'principal' });
+    const workers = await checker.resolveAllowedWorkers({
+      userRole: 'SCHOOL_ADMIN',
+      userId: 'u1',
+      schoolId: 's1',
+    });
+    expect(workers).toEqual(
+      expect.arrayContaining(['operations', 'academic', 'finance', 'admissions', 'curator', 'pedagogy']),
+    );
   });
 });

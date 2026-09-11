@@ -23,6 +23,15 @@ import type {
 } from './timetable-curator.types';
 import { TimetableService } from './timetable.service';
 import { DayOfWeek, PeriodType } from './dto/create-timetable-period.dto';
+import {
+  resolveSchoolSubjectStream,
+  streamFromClassLevel,
+  subjectOfferedInStream,
+} from '../common/utils/subject-level-stream.util';
+import {
+  pickUniqueClassQueryMatch,
+  rankClassQueryMatches,
+} from '../common/utils/class-query.util';
 
 export type CuratePreviewResult = {
   classLabel: string;
@@ -155,18 +164,9 @@ export class TimetableCuratorService {
     const school = await this.schoolRepository.findById(schoolId);
     if (!school) throw new BadRequestException('School not found');
 
-    let termId = dto.termId;
-    if (!termId) {
-      const session = await this.prisma.academicSession.findFirst({
-        where: { schoolId, status: 'ACTIVE' },
-        orderBy: { startDate: 'desc' },
-        select: { terms: { where: { status: 'ACTIVE' }, take: 1, select: { id: true } } },
-      });
-      termId = session?.terms[0]?.id;
-    }
-    if (!termId) {
-      return { error: 'No active term. Create a session and term first.' };
-    }
+    const term = await this.resolveTermId(schoolId, dto.termId);
+    if ('error' in term) return term;
+    const termId = term.termId;
 
     const resolved = await this.resolveClass(schoolId, dto);
     if ('error' in resolved) return resolved;
@@ -330,43 +330,64 @@ export class TimetableCuratorService {
     if (!query) return { error: 'classId, classArmId, or classQuery is required.' };
 
     const arms = await this.prisma.classArm.findMany({
-      where: {
-        classLevel: { schoolId },
-        OR: [
-          { name: { contains: query, mode: 'insensitive' } },
-          { classLevel: { name: { contains: query, mode: 'insensitive' } } },
-        ],
-      },
-      take: 12,
+      where: { isActive: true, classLevel: { schoolId, isActive: true } },
+      take: 80,
       select: { id: true, name: true, classLevel: { select: { id: true, name: true, type: true } } },
     });
-    const labelled = arms.map((arm) => ({
-      classArmId: arm.id,
-      classLevelId: arm.classLevel.id,
-      label: `${arm.classLevel.name} ${arm.name}`.trim(),
-      type: arm.classLevel.type as CuratorSchoolType,
-    }));
-    if (labelled.length === 1) return labelled[0];
-    if (labelled.length === 0) {
-      const classes = await this.prisma.class.findMany({
-        where: { schoolId, name: { contains: query, mode: 'insensitive' } },
-        take: 8,
-        select: { id: true, name: true, type: true },
-      });
-      if (classes.length === 1) {
-        const c = classes[0];
-        return {
-          classId: c.id,
-          label: c.name,
-          type: (c.type as CuratorSchoolType) || 'SECONDARY',
-        };
-      }
-      if (classes.length > 1) {
-        return { error: `Several classes matched "${query}".`, matches: classes.map((c) => ({ label: c.name, classId: c.id })) };
-      }
-      return { error: `No class matched "${query}".` };
+    const rankedArms = rankClassQueryMatches(
+      arms,
+      query,
+      (arm) => `${arm.classLevel.name} ${arm.name}`.trim(),
+      (arm) => arm.classLevel.name,
+    );
+    const uniqueArm = pickUniqueClassQueryMatch(rankedArms);
+    if (uniqueArm) {
+      return {
+        classArmId: uniqueArm.id,
+        classLevelId: uniqueArm.classLevel.id,
+        label: `${uniqueArm.classLevel.name} ${uniqueArm.name}`.trim(),
+        type: uniqueArm.classLevel.type as CuratorSchoolType,
+      };
     }
-    return { error: `Several classes matched "${query}".`, matches: labelled.map((m) => ({ label: m.label, classArmId: m.classArmId })) };
+    if (rankedArms.length > 1) {
+      return {
+        error: `Several classes matched "${query}". Pass classArmId from list_classes.`,
+        matches: rankedArms.slice(0, 8).map((row) => ({
+          label: `${row.item.classLevel.name} ${row.item.name}`.trim(),
+          classArmId: row.item.id,
+        })),
+      };
+    }
+
+    const classes = await this.prisma.class.findMany({
+      where: { schoolId, isActive: true },
+      take: 40,
+      select: { id: true, name: true, type: true, classLevel: true },
+    });
+    const rankedClasses = rankClassQueryMatches(
+      classes,
+      query,
+      (c) => c.name,
+      (c) => c.classLevel || c.name,
+    );
+    const uniqueClass = pickUniqueClassQueryMatch(rankedClasses);
+    if (uniqueClass) {
+      return {
+        classId: uniqueClass.id,
+        label: uniqueClass.name,
+        type: (uniqueClass.type as CuratorSchoolType) || 'SECONDARY',
+      };
+    }
+    if (rankedClasses.length > 1) {
+      return {
+        error: `Several classes matched "${query}".`,
+        matches: rankedClasses.slice(0, 8).map((row) => ({
+          label: row.item.name,
+          classId: row.item.id,
+        })),
+      };
+    }
+    return { error: `No class matched "${query}".` };
   }
 
   private async loadContext(
@@ -508,6 +529,8 @@ export class TimetableCuratorService {
     const rows = await this.prisma.subject.findMany({
       where,
       include: {
+        classLevel: { select: { code: true, name: true } },
+        agoraSubject: { select: { levelStreams: true } },
         subjectTeachers: {
           include: { teacher: { select: { id: true, firstName: true, lastName: true } } },
         },
@@ -515,8 +538,32 @@ export class TimetableCuratorService {
       orderBy: { name: 'asc' },
     });
 
+    let filtered = rows;
+    if (classLevelId && schoolType === 'SECONDARY') {
+      const classLevel = await this.prisma.classLevel.findUnique({
+        where: { id: classLevelId },
+        select: { code: true, name: true },
+      });
+      const targetStream = streamFromClassLevel({
+        code: classLevel?.code,
+        name: classLevel?.name,
+      });
+      if (targetStream) {
+        filtered = rows.filter((s) => {
+          const inferred = resolveSchoolSubjectStream({
+            agoraLevelStreams: s.agoraSubject?.levelStreams,
+            levelStream: s.levelStream,
+            classLevelCode: s.classLevel?.code,
+            classLevelName: s.classLevel?.name,
+            code: s.code,
+          });
+          return subjectOfferedInStream(inferred, targetStream);
+        });
+      }
+    }
+
     const teacherIds = [
-      ...new Set(rows.flatMap((s) => s.subjectTeachers.map((st) => st.teacher.id))),
+      ...new Set(filtered.flatMap((s) => s.subjectTeachers.map((st) => st.teacher.id))),
     ];
     const periodCountMap = new Map<string, number>();
     if (teacherIds.length > 0 && schoolType === 'SECONDARY') {
@@ -537,7 +584,7 @@ export class TimetableCuratorService {
           schoolId,
           classLevelId,
           termId,
-          subjectId: { in: rows.map((s) => s.id) },
+          subjectId: { in: filtered.map((s) => s.id) },
           status: { in: ['DRAFT', 'APPROVED', 'PUBLISHED', 'GENERATING'] },
         },
         select: { subjectId: true, _count: { select: { weeks: true } } },
@@ -547,7 +594,7 @@ export class TimetableCuratorService {
       });
     }
 
-    return rows.map((s) => ({
+    return filtered.map((s) => ({
       id: s.id,
       name: s.name,
       code: s.code || undefined,
@@ -559,5 +606,32 @@ export class TimetableCuratorService {
         periodCount: periodCountMap.get(st.teacher.id) || 0,
       })),
     }));
+  }
+
+  /**
+   * Use a requested term only if it belongs to this school; otherwise the active term.
+   * Invented or stale ids from the model must not fail generate.
+   */
+  async resolveTermId(
+    schoolId: string,
+    requested?: string,
+  ): Promise<{ termId: string } | { error: string }> {
+    if (requested) {
+      const match = await this.prisma.term.findFirst({
+        where: { id: requested, academicSession: { schoolId } },
+        select: { id: true },
+      });
+      if (match) return { termId: match.id };
+    }
+    const session = await this.prisma.academicSession.findFirst({
+      where: { schoolId, status: 'ACTIVE' },
+      orderBy: { startDate: 'desc' },
+      select: { terms: { where: { status: 'ACTIVE' }, take: 1, select: { id: true } } },
+    });
+    const termId = session?.terms[0]?.id;
+    if (!termId) {
+      return { error: 'No active term. Create a session and term first.' };
+    }
+    return { termId };
   }
 }

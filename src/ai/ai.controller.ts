@@ -18,6 +18,7 @@ import { AiInsightsService } from './ai-insights.service';
 import { AiStaffPermissionCheckerService } from './ai-staff-permission-checker.service';
 import { AiCuratorToolsService } from './ai-curator-tools.service';
 import { LoisPendingPlanService } from './lois-pending-plan.service';
+import { LoisRuntimeService } from './lois-graph/lois-runtime.service';
 import {
     GenerateQuizDto,
     GenerateAssessmentDto,
@@ -48,6 +49,7 @@ export class AiController {
         private readonly staffPermissions: AiStaffPermissionCheckerService,
         private readonly curatorTools: AiCuratorToolsService,
         private readonly pendingPlans: LoisPendingPlanService,
+        private readonly loisRuntime: LoisRuntimeService,
     ) { }
 
     /**
@@ -332,6 +334,13 @@ export class AiController {
             user: req.user,
             conversationId: body?.conversationId,
         });
+        void this.loisRuntime.resumeAfterHitl({
+            conversationId: body?.conversationId || plan.conversationId,
+            userId: req.user.id,
+            schoolId,
+            userRole: req.user.role,
+            decision: { applied: true },
+        });
         return { success: true, data };
     }
 
@@ -344,7 +353,17 @@ export class AiController {
         @Param('schoolId') schoolId: string,
         @Param('planId') planId: string,
     ) {
+        const plan = await this.pendingPlans.peek(planId, req.user.id, schoolId).catch(() => null);
         const data = await this.pendingPlans.cancel(planId, req.user.id, schoolId);
+        if (plan?.conversationId) {
+            void this.loisRuntime.resumeAfterHitl({
+                conversationId: plan.conversationId,
+                userId: req.user.id,
+                schoolId,
+                userRole: req.user.role,
+                decision: { cancelled: true },
+            });
+        }
         return { success: true, data };
     }
 

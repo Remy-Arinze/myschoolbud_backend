@@ -2,7 +2,14 @@ import { ForbiddenException, Injectable } from '@nestjs/common';
 import { AdmissionStatus, DayOfWeek, EventType, Prisma, SchemeOfWorkStatus } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { AgentToolContext, AgentToolResult, toolSource } from './ai-lois-source';
+import {
+  keepBestClassQueryMatches,
+  normalizeClassQueryKey,
+  scoreClassQueryMatch,
+} from '../common/utils/class-query.util';
 import { AiSchoolInsightsService, TeacherRagAccess } from './ai-school-insights.service';
+import { extractNamedCalendarDates, resolveCalendarWindow } from './lois-calendar-range';
+import { personNameWhere } from './person-name-filter';
 
 const MAX_LIST = 25;
 
@@ -28,6 +35,7 @@ export class AiSchoolQueryService {
     if (resolved.error) return resolved.error;
 
     const name = args.query?.trim();
+    const nameWhere = name ? personNameWhere(name, { middleName: true }) : {};
     const where: Prisma.EnrollmentWhereInput = {
       schoolId,
       isActive: true,
@@ -37,17 +45,7 @@ export class AiSchoolQueryService {
         ? { classArm: { classLevelId: resolved.classLevelId } }
         : {}),
       ...(access ? { studentId: { in: [...access.studentIds] } } : {}),
-      ...(name
-        ? {
-            student: {
-              OR: [
-                { firstName: { contains: name, mode: 'insensitive' } },
-                { lastName: { contains: name, mode: 'insensitive' } },
-                { middleName: { contains: name, mode: 'insensitive' } },
-              ],
-            },
-          }
-        : {}),
+      ...(name ? { student: nameWhere as Prisma.StudentWhereInput } : {}),
     };
 
     if (access && access.studentIds.size === 0) {
@@ -78,14 +76,122 @@ export class AiSchoolQueryService {
       className: this.classLabel(e),
     }));
 
+    const personLookup =
+      Boolean(name) && !args.classId && !args.classArmId && !args.classQuery && !resolved.classLevelId;
+    let staffMatches: {
+      kind: 'teacher' | 'admin';
+      id: string;
+      name: string;
+      role?: string;
+      subjects?: string[];
+      assignments?: {
+        className: string;
+        formTeacher: boolean;
+        classId?: string | null;
+        classArmId?: string | null;
+      }[];
+    }[] = [];
+    if (name && personLookup && students.length === 0) {
+      const staffWhere = personNameWhere(name) as Prisma.TeacherWhereInput;
+      const adminWhere = personNameWhere(name) as Prisma.SchoolAdminWhereInput;
+      const isAdmin = context?.userRole === 'SCHOOL_ADMIN' || context?.userRole === 'SUPER_ADMIN';
+      const [teachers, admins] = await Promise.all([
+        this.prisma.teacher.findMany({
+          where: { schoolId, ...staffWhere },
+          take: 8,
+          orderBy: { lastName: 'asc' },
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            subject: true,
+            subjectTeachers: { select: { subject: { select: { name: true } } }, take: 6 },
+            classTeachers: {
+              take: 8,
+              select: {
+                isPrimary: true,
+                isFormTeacher: true,
+                classId: true,
+                classArmId: true,
+                class: { select: { name: true } },
+                classArm: { select: { name: true, classLevel: { select: { name: true } } } },
+              },
+            },
+          },
+        }),
+        isAdmin
+          ? this.prisma.schoolAdmin.findMany({
+              where: { schoolId, ...adminWhere },
+              take: 5,
+              orderBy: { lastName: 'asc' },
+              select: { id: true, firstName: true, lastName: true, role: true },
+            })
+          : Promise.resolve([]),
+      ]);
+      staffMatches = [
+        ...teachers.map((t) => ({
+          kind: 'teacher' as const,
+          id: t.id,
+          name: `${t.firstName} ${t.lastName}`.trim(),
+          subjects: [
+            ...new Set(
+              [t.subject, ...t.subjectTeachers.map((s) => s.subject.name)].filter(Boolean) as string[],
+            ),
+          ],
+          assignments: t.classTeachers.map((ct) => ({
+            className: ct.class?.name || this.classLabel({ classArm: ct.classArm }),
+            formTeacher: ct.isPrimary || ct.isFormTeacher,
+            classId: ct.classId,
+            classArmId: ct.classArmId,
+          })),
+        })),
+        ...admins.map((a) => ({
+          kind: 'admin' as const,
+          id: a.id,
+          name: `${a.firstName} ${a.lastName}`.trim(),
+          role: a.role,
+        })),
+      ];
+    }
+
+    const teacherClasses = await this.loadTeacherClassRosters(
+      schoolId,
+      staffMatches
+        .filter((s) => s.kind === 'teacher')
+        .map((s) => ({ id: s.id, name: s.name, assignments: s.assignments })),
+      access,
+      limit,
+    );
+
+    const message =
+      students.length === 0 && staffMatches.length > 0
+        ? teacherClasses.some((c) => c.students.length > 0)
+          ? 'No enrolled student matched that name. staffMatches is the teacher; teacherClasses lists the students in their class — name those students.'
+          : 'No enrolled student matched that name. These staff members matched — they are not students.'
+        : students.length === 0 && name
+          ? 'No enrolled student matched that name. If this might be a teacher or admin, call list_staff with the same query.'
+          : undefined;
+
+    const namedRosterCount = teacherClasses.reduce((n, c) => n + c.students.length, 0);
+
     return {
-      data: { count: students.length, students },
+      data: {
+        count: students.length,
+        students,
+        ...(staffMatches.length ? { staffMatches } : {}),
+        ...(teacherClasses.length ? { teacherClasses } : {}),
+        message,
+      },
       usage: null,
       sources: [
         toolSource(
           'list_students',
-          `${students.length} enrolled student${students.length === 1 ? '' : 's'}`,
-          '/dashboard/school/students',
+          namedRosterCount
+            ? `${staffMatches.length} staff; ${namedRosterCount} student${namedRosterCount === 1 ? '' : 's'} in their class`
+            : staffMatches.length
+              ? `No student; ${staffMatches.length} staff match${staffMatches.length === 1 ? '' : 'es'}`
+              : `${students.length} enrolled student${students.length === 1 ? '' : 's'}`,
+          staffMatches.length ? '/dashboard/school/staff' : '/dashboard/school/students',
         ),
       ],
     };
@@ -259,6 +365,7 @@ export class AiSchoolQueryService {
     const label = resolved.label || (resolved.classArmId ? 'Class arm performance' : 'Class performance');
     return {
       data: {
+        className: label,
         termId,
         studentCount: studentIds.length,
         thresholdPercent: threshold,
@@ -273,6 +380,10 @@ export class AiSchoolQueryService {
           avgPercent: Math.round(r.avgPercent * 10) / 10,
           gradeCount: r.gradeCount,
         })),
+        message:
+          avgRows.length === 0
+            ? 'No published grades this term for this class. Quote the enrolment count; do not send them to an academic dashboard as if averages were hiding there.'
+            : undefined,
       },
       usage: null,
       sources: [toolSource('get_class_performance', label, '/dashboard/school/students')],
@@ -286,13 +397,28 @@ export class AiSchoolQueryService {
     const schoolId = this.requireSchool(context);
     const termId = await this.schoolInsights.getActiveTermId(schoolId);
 
+    let classLevelId = args.classLevelId;
+    let classId = args.classId;
+    let focusArmId: string | undefined;
+    if (args.classId) {
+      const arm = await this.prisma.classArm.findFirst({
+        where: { id: args.classId, classLevel: { schoolId } },
+        select: { id: true, classLevelId: true },
+      });
+      if (arm) {
+        focusArmId = arm.id;
+        classLevelId = classLevelId || arm.classLevelId;
+        classId = undefined;
+      }
+    }
+
     const schemes = await this.prisma.schemeOfWork.findMany({
       where: {
         schoolId,
         status: SchemeOfWorkStatus.PUBLISHED,
         ...(termId ? { termId } : {}),
-        ...(args.classId ? { classId: args.classId } : {}),
-        ...(args.classLevelId ? { classLevelId: args.classLevelId } : {}),
+        ...(classId ? { classId } : {}),
+        ...(classLevelId ? { classLevelId } : {}),
         ...(args.subjectId ? { subjectId: args.subjectId } : {}),
       },
       take: 8,
@@ -318,6 +444,14 @@ export class AiSchoolQueryService {
             calendarStartDate: true,
             calendarEndDate: true,
             topics: { select: { stableKey: true, agoraTopicId: true } },
+            deliveries: {
+              select: {
+                classArmId: true,
+                status: true,
+                lessonNoteUrl: true,
+                classArm: { select: { name: true, classLevel: { select: { name: true } } } },
+              },
+            },
           },
         },
       },
@@ -336,25 +470,44 @@ export class AiSchoolQueryService {
       schemeId: s.id,
       subject: subjectName.get(s.subjectId) || 'Subject',
       classLevel: s.classLevel?.name || null,
-      weeks: s.weeks.map((w) => ({
-        weekNumber: w.weekNumber,
-        topic: w.topic,
-        stableKeys: w.topics.map((t) => t.stableKey),
-        learningOutcomes: w.learningOutcomes,
-        studentFriendlyOutcomes: w.studentFriendlyOutcomes,
-        isDelivered: w.isDelivered,
-        hasLessonNote: Boolean(w.lessonNoteUrl),
-        calendarStart: w.calendarStartDate?.toISOString().slice(0, 10) ?? null,
-        calendarEnd: w.calendarEndDate?.toISOString().slice(0, 10) ?? null,
-      })),
+      classLevelId: s.classLevelId,
+      weeks: s.weeks.map((w) => {
+        const arms = w.deliveries.map((d) => ({
+          classArmId: d.classArmId,
+          label: d.classArm ? `${d.classArm.classLevel.name} ${d.classArm.name}`.trim() : null,
+          status: d.status,
+          hasLessonNote: Boolean(d.lessonNoteUrl),
+        }));
+        const focus = focusArmId ? arms.find((a) => a.classArmId === focusArmId) : undefined;
+        return {
+          weekNumber: w.weekNumber,
+          topic: w.topic,
+          stableKeys: w.topics.map((t) => t.stableKey),
+          learningOutcomes: w.learningOutcomes,
+          studentFriendlyOutcomes: w.studentFriendlyOutcomes,
+          isDelivered: focus ? focus.status === 'DELIVERED' : w.isDelivered,
+          hasLessonNote: Boolean(w.lessonNoteUrl),
+          calendarStart: w.calendarStartDate?.toISOString().slice(0, 10) ?? null,
+          calendarEnd: w.calendarEndDate?.toISOString().slice(0, 10) ?? null,
+          arms,
+        };
+      }),
     }));
+
+    const emptyWeekFilter =
+      payload.length > 0 && args.weekNumber != null && payload.every((s) => s.weeks.length === 0);
 
     return {
       data: {
         termId,
         count: payload.length,
         schemes: payload,
-        message: payload.length === 0 ? 'No published scheme of work matched those filters.' : undefined,
+        message:
+          payload.length === 0
+            ? 'No published scheme of work matched those filters. Primary/secondary schemes live on the class level — pass classLevelId, or a class-arm id as classId.'
+            : emptyWeekFilter
+              ? `Published scheme(s) found, but none include week ${args.weekNumber}. That is not the same as an unpublished scheme.`
+              : undefined,
       },
       usage: null,
       sources: [toolSource('get_scheme_of_work', 'Published scheme of work', '/dashboard/school/overview')],
@@ -457,6 +610,7 @@ export class AiSchoolQueryService {
       data: {
         dayOfWeek,
         currentTime,
+        className: resolved.label || klass?.name || null,
         status: 'in_session',
         type: period.type,
         subject: period.subject?.name ?? null,
@@ -535,6 +689,7 @@ export class AiSchoolQueryService {
         })
       : [];
     const byEnr = new Map(enrollments.map((e) => [e.id, e]));
+    const marked = (counts.PRESENT || 0) + (counts.ABSENT || 0) + (counts.LATE || 0);
 
     return {
       data: {
@@ -549,6 +704,11 @@ export class AiSchoolQueryService {
             absentDays: r._count._all,
           };
         }),
+        productStatus: marked === 0 ? 'barebones' : 'records',
+        message:
+          marked === 0
+            ? 'No attendance marks in this window. Daily attendance tracking is not fully in use yet — zeros mean no records were taken, not that everyone was present, and not that there is an attendance dashboard to check.'
+            : undefined,
       },
       usage: null,
       sources: [toolSource('get_attendance_summary', `Attendance · last ${days} days`)],
@@ -714,6 +874,10 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
           room: p.room?.name ?? null,
         })),
         message: periods.length === 0 ? `No timetable periods on ${dayOfWeek}.` : undefined,
+        nextHint:
+          periods.length === 0
+            ? 'This is a lookup of saved periods, not a generated timetable. If the user asked to generate or auto-fill one, call inspect_scheduling_context then propose_timetable.'
+            : undefined,
       },
       usage: null,
       sources: [
@@ -734,19 +898,13 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
     const includeAdmins = isAdmin && (kind === 'admin' || kind === 'all');
     const includeTeachers = kind !== 'admin';
 
-    const nameFilter = name
-      ? {
-          OR: [
-            { firstName: { contains: name, mode: 'insensitive' as const } },
-            { lastName: { contains: name, mode: 'insensitive' as const } },
-          ],
-        }
-      : {};
+    const teacherNameFilter = (name ? personNameWhere(name) : {}) as Prisma.TeacherWhereInput;
+    const adminNameFilter = (name ? personNameWhere(name) : {}) as Prisma.SchoolAdminWhereInput;
 
     const [teachers, admins] = await Promise.all([
       includeTeachers
         ? this.prisma.teacher.findMany({
-            where: { schoolId, ...nameFilter },
+            where: { schoolId, ...teacherNameFilter },
             take: limit,
             orderBy: { lastName: 'asc' },
             select: {
@@ -764,6 +922,8 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
                 select: {
                   isPrimary: true,
                   isFormTeacher: true,
+                  classId: true,
+                  classArmId: true,
                   class: { select: { name: true } },
                   classArm: { select: { name: true, classLevel: { select: { name: true } } } },
                 },
@@ -773,7 +933,7 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
         : Promise.resolve([]),
       includeAdmins
         ? this.prisma.schoolAdmin.findMany({
-            where: { schoolId, ...nameFilter },
+            where: { schoolId, ...adminNameFilter },
             take: limit,
             orderBy: { lastName: 'asc' },
             select: {
@@ -789,25 +949,43 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
         : Promise.resolve([]),
     ]);
 
+    const mappedTeachers = teachers.map((t) => ({
+      teacherId: t.id,
+      name: `${t.firstName} ${t.lastName}`.trim(),
+      subjects: [
+        ...new Set(
+          [t.subject, ...t.subjectTeachers.map((s) => s.subject.name)].filter(Boolean) as string[],
+        ),
+      ],
+      schoolType: t.schoolType,
+      assignments: t.classTeachers.map((ct) => ({
+        className: ct.class?.name || this.classLabel({ classArm: ct.classArm }),
+        formTeacher: ct.isPrimary || ct.isFormTeacher,
+        classId: ct.classId,
+        classArmId: ct.classArmId,
+      })),
+      ...(isAdmin
+        ? { phone: t.phone, email: t.email, billingSuspended: t.billingSuspended }
+        : {}),
+    }));
+
+    const access = await this.teacherAccess(context, schoolId);
+    const teacherClasses = name
+      ? await this.loadTeacherClassRosters(
+          schoolId,
+          mappedTeachers.map((t) => ({
+            id: t.teacherId,
+            name: t.name,
+            assignments: t.assignments,
+          })),
+          access,
+          limit,
+        )
+      : [];
+
     return {
       data: {
-        teachers: teachers.map((t) => ({
-          teacherId: t.id,
-          name: `${t.firstName} ${t.lastName}`.trim(),
-          subjects: [
-            ...new Set(
-              [t.subject, ...t.subjectTeachers.map((s) => s.subject.name)].filter(Boolean) as string[],
-            ),
-          ],
-          schoolType: t.schoolType,
-          assignments: t.classTeachers.map((ct) => ({
-            className: ct.class?.name || this.classLabel({ classArm: ct.classArm }),
-            formTeacher: ct.isPrimary || ct.isFormTeacher,
-          })),
-          ...(isAdmin
-            ? { phone: t.phone, email: t.email, billingSuspended: t.billingSuspended }
-            : {}),
-        })),
+        teachers: mappedTeachers,
         admins: admins.map((a) => ({
           adminId: a.id,
           name: `${a.firstName} ${a.lastName}`.trim(),
@@ -816,9 +994,21 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
             ? { phone: a.phone, email: a.email, billingSuspended: a.billingSuspended }
             : {}),
         })),
+        ...(teacherClasses.length ? { teacherClasses } : {}),
+        message: teacherClasses.some((c) => c.students.length > 0)
+          ? 'teacherClasses lists the students in this teacher\'s class — name those students.'
+          : undefined,
       },
       usage: null,
-      sources: [toolSource('list_staff', 'Staff directory', '/dashboard/school/staff')],
+      sources: [
+        toolSource(
+          'list_staff',
+          teacherClasses.some((c) => c.students.length > 0)
+            ? `${name} · class roster`
+            : 'Staff directory',
+          '/dashboard/school/staff',
+        ),
+      ],
     };
   }
 
@@ -894,16 +1084,61 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
       formTeacher: a.isPrimary || a.isFormTeacher,
     }));
 
+    let schoolSubjectStaff: {
+      teacherId: string;
+      name: string;
+      subjects: string[];
+    }[] = [];
+    if (subjectQuery && teachers.length === 0) {
+      const specialists = await this.prisma.teacher.findMany({
+        where: {
+          schoolId,
+          OR: [
+            { subject: { contains: subjectQuery, mode: 'insensitive' } },
+            {
+              subjectTeachers: {
+                some: { subject: { name: { contains: subjectQuery, mode: 'insensitive' } } },
+              },
+            },
+          ],
+        },
+        take: 12,
+        orderBy: { lastName: 'asc' },
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          subject: true,
+          subjectTeachers: { select: { subject: { select: { name: true } } }, take: 6 },
+        },
+      });
+      schoolSubjectStaff = specialists.map((t) => ({
+        teacherId: t.id,
+        name: `${t.firstName} ${t.lastName}`.trim(),
+        subjects: [
+          ...new Set(
+            [t.subject, ...t.subjectTeachers.map((s) => s.subject.name)].filter(Boolean) as string[],
+          ),
+        ],
+      }));
+    }
+
+    const classLabel = resolved.label ?? null;
+    const message =
+      teachers.length === 0 && !formTeacher
+        ? schoolSubjectStaff.length
+          ? `No teacher is assigned to ${classLabel || 'this class'} for ${subjectQuery} on the timetable. These staff are listed as ${subjectQuery} teachers at the school.`
+          : 'No teacher assignment matched those filters.'
+        : undefined;
+
     return {
       data: {
-        className: resolved.label ?? null,
+        className: classLabel,
         formTeacher,
         matchedSubjects: subjectRows.map((s) => s.name),
         teachers,
-        message:
-          teachers.length === 0 && !formTeacher
-            ? 'No teacher assignment matched those filters.'
-            : undefined,
+        ...(schoolSubjectStaff.length ? { schoolSubjectStaff } : {}),
+        message,
       },
       usage: null,
       sources: [toolSource('who_teaches', resolved.label || subjectQuery || 'Teacher assignments', '/dashboard/school/staff')],
@@ -1030,8 +1265,12 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
           ...d,
           unpaidAmount: Math.round(d.unpaidAmount * 100) / 100,
         })),
-        message: debtors.length === 0 ? 'No outstanding fees matched those filters.' : undefined,
-        note: 'Lois cannot record a payment. Use the dashboard to take fees.',
+        message:
+          debtors.length === 0
+            ? 'No unpaid fee records on file. Fee collection / bursary is not fully in use yet — this is not a complete fees dashboard, and zeros do not mean a bursar checked every family.'
+            : undefined,
+        note: 'Lois cannot record a payment. Bursary and taking payments are not fully built — do not send the owner to a Fees page as if it were complete.',
+        productStatus: 'barebones',
       },
       usage: null,
       sources: [toolSource('list_fee_debtors', `${debtors.length} with outstanding fees`, '/dashboard/school/students')],
@@ -1104,17 +1343,22 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
   }
 
   async getCalendar(
-    args: { from?: string; to?: string; type?: string },
+    args: { from?: string; to?: string; type?: string; range?: string },
     context?: AgentToolContext,
   ): Promise<AgentToolResult> {
     const schoolId = this.requireSchool(context);
     const { ymd } = this.watClock();
-    const fromStr = args.from?.trim() || ymd;
+    const window = resolveCalendarWindow(
+      { range: args.range, from: args.from?.trim(), to: args.to?.trim() },
+      ymd,
+      context?.userMessage,
+    );
+    const fromStr = window.from;
     const from = this.parseIsoDate(fromStr, false);
     if (!from) {
       return { data: { error: 'from must be YYYY-MM-DD.' }, usage: null };
     }
-    const toStr = args.to?.trim() || this.addDaysYmd(fromStr, 7);
+    const toStr = window.to;
     const to = this.parseIsoDate(toStr, true);
     if (!to) {
       return { data: { error: 'to must be YYYY-MM-DD.' }, usage: null };
@@ -1155,21 +1399,90 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
       },
     });
 
+    const mapEvent = (e: (typeof events)[number]) => ({
+      title: e.title,
+      type: e.type,
+      start: e.startDate.toISOString(),
+      end: e.endDate.toISOString(),
+      allDay: e.isAllDay,
+      location: e.location,
+      schoolType: e.schoolType,
+    });
+
+    const named = extractNamedCalendarDates(context?.userMessage, ymd);
+    const namedDates: Array<{
+      label: string;
+      date: string;
+      inThisWeek: boolean;
+      count: number;
+      events: ReturnType<typeof mapEvent>[];
+      message?: string;
+    }> = [];
+    for (const item of named) {
+      const inThisWeek = item.date >= fromStr && item.date <= toStr;
+      const dayStart = this.parseIsoDate(item.date, false);
+      const dayEnd = this.parseIsoDate(item.date, true);
+      let namedEvents: ReturnType<typeof mapEvent>[] = [];
+      if (dayStart && dayEnd) {
+        if (inThisWeek) {
+          namedEvents = events.filter((e) => e.startDate <= dayEnd && e.endDate >= dayStart).map(mapEvent);
+        } else {
+          const extra = await this.prisma.event.findMany({
+            where: {
+              schoolId,
+              ...(eventType ? { type: eventType } : {}),
+              OR: [
+                { startDate: { gte: dayStart, lte: dayEnd } },
+                { endDate: { gte: dayStart, lte: dayEnd } },
+                { AND: [{ startDate: { lte: dayStart } }, { endDate: { gte: dayEnd } }] },
+              ],
+            },
+            orderBy: { startDate: 'asc' },
+            take: 10,
+            select: {
+              title: true,
+              type: true,
+              startDate: true,
+              endDate: true,
+              location: true,
+              isAllDay: true,
+              schoolType: true,
+            },
+          });
+          namedEvents = extra.map(mapEvent);
+        }
+      }
+      namedDates.push({
+        label: item.label,
+        date: item.date,
+        inThisWeek,
+        count: namedEvents.length,
+        events: namedEvents,
+        message: namedEvents.length
+          ? undefined
+          : inThisWeek
+            ? `No school calendar event on ${item.label} (${item.date}).`
+            : `${item.label} is ${item.date}, which is not this week (${fromStr}–${toStr}). No school calendar event on that date.`,
+      });
+    }
+
     return {
       data: {
+        today: ymd,
         from: fromStr,
         to: toStr,
+        range: window.preset,
         count: events.length,
-        events: events.map((e) => ({
-          title: e.title,
-          type: e.type,
-          start: e.startDate.toISOString(),
-          end: e.endDate.toISOString(),
-          allDay: e.isAllDay,
-          location: e.location,
-          schoolType: e.schoolType,
-        })),
-        message: events.length === 0 ? 'No calendar events in that range.' : undefined,
+        events: events.map(mapEvent),
+        ...(namedDates.length ? { namedDates } : {}),
+        message: events.length === 0
+          ? window.preset === 'this_week'
+            ? 'No calendar events this week.'
+            : 'No calendar events in that range.'
+          : undefined,
+        note: namedDates.some((n) => !n.inThisWeek)
+          ? 'namedDates outside this week are NOT this week. Do not say Independence Day is this week unless inThisWeek is true.'
+          : undefined,
       },
       usage: null,
       sources: [toolSource('get_calendar', `Calendar ${fromStr}–${toStr}`, '/dashboard/school/calendar')],
@@ -1254,6 +1567,99 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
     return `${level} ${arm}`.trim() || 'Class';
   }
 
+  /** Homeroom roster for a named teacher (ClassTeacher rows and ClassArm.classTeacherId). */
+  private async loadTeacherClassRosters(
+    schoolId: string,
+    teachers: {
+      id: string;
+      name: string;
+      assignments?: {
+        className: string;
+        formTeacher: boolean;
+        classId?: string | null;
+        classArmId?: string | null;
+      }[];
+    }[],
+    access: TeacherRagAccess | null,
+    limit: number,
+  ): Promise<
+    { teacherName: string; className: string; students: { name: string; admissionNumber: string }[] }[]
+  > {
+    const refs: {
+      teacherName: string;
+      className: string;
+      classId?: string | null;
+      classArmId?: string | null;
+    }[] = [];
+    const seen = new Set<string>();
+    const remember = (ref: (typeof refs)[number]) => {
+      const key = `${ref.classArmId || ''}:${ref.classId || ''}:${ref.teacherName}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      refs.push(ref);
+    };
+
+    for (const t of teachers) {
+      for (const a of t.assignments || []) {
+        if (!(a.formTeacher && (a.classArmId || a.classId))) continue;
+        remember({
+          teacherName: t.name,
+          className: a.className,
+          classId: a.classId,
+          classArmId: a.classArmId,
+        });
+      }
+    }
+
+    const ids = teachers.map((t) => t.id).filter(Boolean);
+    if (ids.length > 0) {
+      const arms = await this.prisma.classArm.findMany({
+        where: { classTeacherId: { in: ids }, classLevel: { schoolId } },
+        select: {
+          id: true,
+          name: true,
+          classTeacherId: true,
+          classLevel: { select: { name: true } },
+        },
+      });
+      for (const arm of arms) {
+        const t = teachers.find((x) => x.id === arm.classTeacherId);
+        if (!t) continue;
+        remember({
+          teacherName: t.name,
+          className: this.classLabel({ classArm: arm }),
+          classArmId: arm.id,
+        });
+      }
+    }
+
+    if (refs.length === 0) return [];
+
+    return Promise.all(
+      refs.map(async (ref) => {
+        const roster = await this.prisma.enrollment.findMany({
+          where: {
+            schoolId,
+            isActive: true,
+            ...(ref.classArmId ? { classArmId: ref.classArmId } : { classId: ref.classId || undefined }),
+            ...(access ? { studentId: { in: [...access.studentIds] } } : {}),
+          },
+          take: limit,
+          orderBy: { student: { lastName: 'asc' } },
+          select: { student: { select: { firstName: true, lastName: true, uid: true } } },
+        });
+        return {
+          teacherName: ref.teacherName,
+          className: ref.className,
+          students: roster.map((e) => ({
+            name: `${e.student.firstName} ${e.student.lastName}`.trim(),
+            admissionNumber: e.student.uid,
+          })),
+        };
+      }),
+    );
+  }
+
   private async teacherAccess(
     context: AgentToolContext | undefined,
     schoolId: string,
@@ -1300,10 +1706,6 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
   private money(value: unknown): number {
     const n = Number(value);
     return Number.isFinite(n) ? Math.round(n * 100) / 100 : 0;
-  }
-
-  private normalizeKey(s: string): string {
-    return s.toLowerCase().replace(/[^a-z0-9]+/g, '');
   }
 
   private watClock(): { dayOfWeek: DayOfWeek; currentTime: string; ymd: string } {
@@ -1362,17 +1764,6 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
     return `${wat.getFullYear()}-${String(wat.getMonth() + 1).padStart(2, '0')}-${String(wat.getDate()).padStart(2, '0')}`;
   }
 
-  private scoreClassMatch(queryKey: string, labelKey: string, levelKey: string): number {
-    if (!queryKey) return 1;
-    if (labelKey === queryKey) return 100;
-    if (labelKey.startsWith(queryKey) || queryKey.startsWith(labelKey)) return 80;
-    if (labelKey.includes(queryKey) || queryKey.includes(labelKey)) return 60;
-    if (levelKey === queryKey) return 40;
-    if (levelKey.startsWith(queryKey) || queryKey.startsWith(levelKey)) return 30;
-    if (levelKey.includes(queryKey)) return 20;
-    return 0;
-  }
-
   private async searchClassDirectory(
     schoolId: string,
     query: string | undefined,
@@ -1425,7 +1816,7 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
 
     const armCountMap = new Map(armCounts.map((r) => [r.classArmId, r._count._all]));
     const classCountMap = new Map(classCounts.map((r) => [r.classId, r._count._all]));
-    const queryKey = query ? this.normalizeKey(query) : '';
+    const queryKey = query ? normalizeClassQueryKey(query) : '';
 
     const rows: {
       classId: string | null;
@@ -1442,10 +1833,10 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
     for (const arm of arms) {
       if (access && !access.classArmIds.has(arm.id)) continue;
       const label = `${arm.classLevel.name} ${arm.name}`.trim();
-      const score = this.scoreClassMatch(
+      const score = scoreClassQueryMatch(
         queryKey,
-        this.normalizeKey(label),
-        this.normalizeKey(arm.classLevel.name),
+        normalizeClassQueryKey(label),
+        normalizeClassQueryKey(arm.classLevel.name),
       );
       if (queryKey && score === 0) continue;
       rows.push({
@@ -1466,10 +1857,10 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
     for (const klass of classes) {
       if (access && klass.id && !access.classIds.has(klass.id)) continue;
       const label = klass.code ? `${klass.name} (${klass.code})` : klass.name;
-      const score = this.scoreClassMatch(
+      const score = scoreClassQueryMatch(
         queryKey,
-        this.normalizeKey(`${klass.name}${klass.code || ''}${klass.classLevel || ''}`),
-        this.normalizeKey(klass.classLevel || klass.name),
+        normalizeClassQueryKey(`${klass.name}${klass.code || ''}${klass.classLevel || ''}`),
+        normalizeClassQueryKey(klass.classLevel || klass.name),
       );
       if (queryKey && score === 0) continue;
       rows.push({
@@ -1486,7 +1877,8 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
     }
 
     rows.sort((a, b) => b.score - a.score || a.label.localeCompare(b.label));
-    return rows.slice(0, limit);
+    const narrowed = queryKey ? keepBestClassQueryMatches(rows) : rows;
+    return narrowed.slice(0, limit);
   }
 
   private async resolveClassArgs(
@@ -1549,14 +1941,16 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
     if (matches.length === 0) {
       return { error: { data: { error: `No class matched "${query}".`, matches: [] }, usage: null } };
     }
-    if (matches.length === 1) {
-      const m = matches[0];
+    const queryKey = normalizeClassQueryKey(query);
+    const exact = matches.filter((m) => normalizeClassQueryKey(m.label) === queryKey);
+    const unique = exact.length === 1 ? exact[0] : matches.length === 1 ? matches[0] : null;
+    if (unique) {
       return {
-        classId: m.classId ?? undefined,
-        classArmId: m.classArmId ?? undefined,
-        classLevelId: m.classLevelId ?? undefined,
-        label: m.label,
-        type: m.type,
+        classId: unique.classId ?? undefined,
+        classArmId: unique.classArmId ?? undefined,
+        classLevelId: unique.classLevelId ?? undefined,
+        label: unique.label,
+        type: unique.type,
       };
     }
 

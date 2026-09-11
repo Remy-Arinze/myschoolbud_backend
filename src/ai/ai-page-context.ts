@@ -12,4 +12,6 @@ export type LoisPageContextInput = {
   weekNumber?: number;
   label?: string;
   path?: string;
+  /** Briefing “Ask about this” — start Academic with this insight in context. */
+  insightId?: string;
 };

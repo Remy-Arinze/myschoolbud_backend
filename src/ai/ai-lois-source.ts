@@ -3,6 +3,8 @@ export type AgentToolContext = {
   userRole?: string;
   userId?: string;
   conversationId?: string | null;
+  /** Latest user utterance — used to pin relative calendar windows. */
+  userMessage?: string | null;
 };
 
 /** Grounding chips attached to Lois tool / RAG results. */

@@ -11,6 +11,12 @@ import {
   isLoisInsightType,
   type LoisInsightType,
 } from './lois-insight-access';
+import {
+  ADMIN_GRAPH_WORKERS,
+  TEACHER_GRAPH_WORKERS,
+  WORKER_TOOL_NAMES,
+  type LoisWorker,
+} from './lois-workers';
 
 const STUDENT_BLOCKED_TOOLS = [
   'get_school_stats',
@@ -35,6 +41,7 @@ const STUDENT_BLOCKED_TOOLS = [
   'inspect_curriculum_options',
   'propose_timetable',
   'propose_scheme',
+  'apply_pending_plans',
 ];
 
 const TEACHER_BLOCKED_TOOLS = [
@@ -43,6 +50,7 @@ const TEACHER_BLOCKED_TOOLS = [
   'list_admissions',
   'propose_timetable',
   'propose_scheme',
+  'apply_pending_plans',
 ];
 
 /**
@@ -250,6 +258,8 @@ export class AiStaffPermissionCheckerService {
           throw new ForbiddenException('You need Curriculum or Scheme of Work (write) access to propose a scheme.');
         }
         return;
+      case 'apply_pending_plans':
+        return;
       case 'grade_essay':
         if (!(await this.schoolAdminHasPermission(id, PermissionResource.GRADES, PermissionType.READ))) {
           throw new ForbiddenException('You need Grades (read) access to use essay grading.');
@@ -406,5 +416,47 @@ export class AiStaffPermissionCheckerService {
       }
     }
     return userIds;
+  }
+
+  /**
+   * Workers this user may have compiled into the Lois graph.
+   * Omits desks (curator, finance, …) whose tools would all fail permission checks.
+   */
+  async resolveAllowedWorkers(params: {
+    userRole?: string;
+    userId?: string;
+    schoolId?: string;
+  }): Promise<LoisWorker[]> {
+    const { userRole, userId, schoolId } = params;
+
+    if (userRole === 'STUDENT') return [];
+    if (userRole === 'TEACHER') return [...TEACHER_GRAPH_WORKERS];
+    if (userRole === 'SUPER_ADMIN') return [...ADMIN_GRAPH_WORKERS];
+    if (userRole !== 'SCHOOL_ADMIN' || !userId || !schoolId) return [];
+
+    const allowed: LoisWorker[] = [];
+    for (const worker of ADMIN_GRAPH_WORKERS) {
+      if (await this.workerHasAnyPermittedTool(WORKER_TOOL_NAMES[worker], userRole, userId, schoolId)) {
+        allowed.push(worker);
+      }
+    }
+    return allowed;
+  }
+
+  private async workerHasAnyPermittedTool(
+    toolNames: readonly string[],
+    userRole: string,
+    userId: string,
+    schoolId: string,
+  ): Promise<boolean> {
+    for (const toolName of toolNames) {
+      try {
+        await this.assertLoisToolAllowed({ toolName, userRole, userId, schoolId });
+        return true;
+      } catch {
+        // try next tool in the desk
+      }
+    }
+    return false;
   }
 }

@@ -31,6 +31,8 @@ import { LoisSkillsService } from './lois-skills.service';
 import { LoisPendingPlanService } from './lois-pending-plan.service';
 import { AiCuratorToolsService } from './ai-curator-tools.service';
 import { TimetableModule } from '../timetable/timetable.module';
+import { LoisCheckpointerService } from './lois-graph/lois-checkpointer.service';
+import { LoisRuntimeService } from './lois-graph/lois-runtime.service';
 
 @Module({
   imports: [
@@ -60,6 +62,8 @@ import { TimetableModule } from '../timetable/timetable.module';
     AiChatPromptService,
     AiSchoolChatService,
     AiChatStreamService,
+    LoisCheckpointerService,
+    LoisRuntimeService,
     AiCurriculumPipelineService,
     AiService,
     KnowledgeIndexingService,

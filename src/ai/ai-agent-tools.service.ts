@@ -60,6 +60,7 @@ export class AiAgentToolsService {
       inspect_curriculum_options: 'Curriculum inspect',
       propose_timetable: 'Timetable proposal',
       propose_scheme: 'Scheme proposal',
+      apply_pending_plans: 'Apply previews',
     };
     return names[toolName] || toolName.replace(/_/g, ' ');
   }
@@ -95,6 +96,7 @@ export class AiAgentToolsService {
       inspect_curriculum_options: 'Checking Bud library weeks against your term calendar...',
       propose_timetable: 'Drafting a timetable preview (not saved yet)...',
       propose_scheme: 'Drafting a scheme proposal (not generated yet)...',
+      apply_pending_plans: 'Saving the previews you asked to apply...',
     };
     return messages[toolName] || 'Processing your request...';
   }
@@ -261,6 +263,9 @@ export class AiAgentToolsService {
       case 'propose_scheme':
         return this.curatorTools.proposeScheme(args || {}, context);
 
+      case 'apply_pending_plans':
+        return this.curatorTools.applyPendingPlans(args || {}, context);
+
       case 'search_semantic':
         return this.searchSemantic(
           args.query,
@@ -341,6 +346,10 @@ export class AiAgentToolsService {
           avgPercent: Math.round(s.avgPercent * 10) / 10,
           gradeCount: s.gradeCount,
         })),
+        message:
+          students.length === 0
+            ? 'No students are below the published-grade threshold. If the gradebook is empty this term, say that — do not claim everyone is thriving, and do not send them to an academic dashboard.'
+            : undefined,
       },
       usage: null,
       sources: [
@@ -384,18 +393,26 @@ export class AiAgentToolsService {
   async getSchoolStats(schoolId?: string): Promise<AgentToolResult> {
     if (!schoolId) return { data: { error: 'School ID is required' }, usage: null };
 
-    const [classCount, teacherCount, studentCount] = await Promise.all([
+    const [classCount, classArmCount, teacherCount, studentCount] = await Promise.all([
       this.prisma.class.count({ where: { schoolId } }),
+      this.prisma.classArm.count({
+        where: { isActive: true, classLevel: { schoolId, isActive: true } },
+      }),
       this.prisma.teacher.count({ where: { schoolId } }),
       this.prisma.enrollment.count({ where: { schoolId, isActive: true } }),
     ]);
 
     return {
       data: {
-        classes: classCount,
+        classes: classArmCount,
+        classArms: classArmCount,
         teachers: teacherCount,
         students: studentCount,
         totalPopulation: studentCount + teacherCount,
+        note:
+          classCount === 0 && classArmCount > 0
+            ? 'classes/classArms is the number of active class arms. Do not say there are 0 classes.'
+            : undefined,
       },
       usage: null,
       sources: [toolSource('get_school_stats', 'Live school counts', '/dashboard/school/overview')],

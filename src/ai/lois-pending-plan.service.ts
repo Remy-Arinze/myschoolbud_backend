@@ -1,8 +1,10 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { LOIS_CURATOR_PLAN_TTL_MS } from '../timetable/timetable-curator.constants';
+import { classLabelMatches, payloadClassLabel } from './lois-plan-facing';
 
 export type PendingPlanKind = 'TIMETABLE' | 'SCHEME';
+export type PendingPlanApplyKind = PendingPlanKind | 'ALL';
 
 @Injectable()
 export class LoisPendingPlanService {
@@ -71,5 +73,70 @@ export class LoisPendingPlanService {
     if (!plan) return { cancelled: false };
     await this.model.update({ where: { id: planId }, data: { status: 'CANCELLED' } });
     return { cancelled: true };
+  }
+
+  async listActive(params: {
+    userId: string;
+    schoolId: string;
+    conversationId?: string | null;
+    kind?: PendingPlanApplyKind;
+  }) {
+    const now = new Date();
+    const where: Record<string, unknown> = {
+      userId: params.userId,
+      schoolId: params.schoolId,
+      status: 'PROPOSED',
+    };
+    if (params.kind && params.kind !== 'ALL') {
+      where.kind = params.kind;
+    }
+    if (params.conversationId) {
+      where.OR = [{ conversationId: params.conversationId }, { conversationId: null }];
+    }
+
+    const rows = await this.model.findMany({
+      where,
+      orderBy: { createdAt: 'asc' },
+    });
+
+    const active: typeof rows = [];
+    for (const row of rows) {
+      if (new Date(row.expiresAt).getTime() < now.getTime()) {
+        await this.model.update({ where: { id: row.id }, data: { status: 'EXPIRED' } });
+        continue;
+      }
+      active.push(row);
+    }
+    return active;
+  }
+
+  matchByClassQueries<T extends { payload?: unknown; summary?: string }>(
+    plans: T[],
+    classQueries: string[],
+  ): { matched: T[]; unmatchedQueries: string[] } {
+    const queries = classQueries.map((q) => q.trim()).filter(Boolean);
+    if (queries.length === 0) return { matched: [], unmatchedQueries: [] };
+
+    const matched: T[] = [];
+    const seen = new Set<T>();
+    const unmatchedQueries: string[] = [];
+
+    for (const query of queries) {
+      const hits = plans.filter((plan) => {
+        const label = payloadClassLabel(plan.payload) || plan.summary;
+        return classLabelMatches(label, query);
+      });
+      if (hits.length === 0) {
+        unmatchedQueries.push(query);
+        continue;
+      }
+      for (const hit of hits) {
+        if (!seen.has(hit)) {
+          seen.add(hit);
+          matched.push(hit);
+        }
+      }
+    }
+    return { matched, unmatchedQueries };
   }
 }

@@ -7,6 +7,15 @@ import { AiSchoolInsightsService } from './ai-school-insights.service';
 import { AgentToolContext, AgentToolResult, toolSource } from './ai-lois-source';
 import { AiStaffPermissionCheckerService } from './ai-staff-permission-checker.service';
 import { LOIS_INSIGHT_TYPES, isLoisInsightType, type LoisInsightType } from './lois-insight-access';
+import {
+  isGenericSowHref,
+  partitionArmsForWeek,
+  sowGapAskPrompt,
+  sowGapHref,
+  sowGapSummary,
+  sowGapTitle,
+  type SowGapArm,
+} from './lois-sow-gap';
 
 export { LOIS_INSIGHT_TYPES, type LoisInsightType } from './lois-insight-access';
 
@@ -137,7 +146,10 @@ export class AiInsightsService {
     return { ...insight, unread: false };
   }
 
-  async listForTool(args: { limit?: number }, context?: AgentToolContext): Promise<AgentToolResult> {
+  async listForTool(
+    args: { limit?: number; insightId?: string },
+    context?: AgentToolContext,
+  ): Promise<AgentToolResult> {
     const schoolId = context?.schoolId;
     if (!schoolId) {
       return { data: { error: 'School context is required.' }, usage: null };
@@ -147,6 +159,21 @@ export class AiInsightsService {
       schoolId,
       context?.userRole,
     );
+    if (args.insightId) {
+      try {
+        const insight = await this.getById(schoolId, args.insightId, types, context?.userId);
+        return {
+          data: { count: 1, insights: [insight] },
+          usage: null,
+          sources: [toolSource('list_lois_insights', insight.title, insight.href ?? undefined)],
+        };
+      } catch {
+        return {
+          data: { count: 0, insights: [], message: 'That filed report was not found or is not in your access.' },
+          usage: null,
+        };
+      }
+    }
     const insights = await this.listForSchool(schoolId, args.limit ?? 8, types, context?.userId);
     return {
       data: { count: insights.length, insights },
@@ -316,11 +343,71 @@ export class AiInsightsService {
       title: r.title,
       summary: r.summary,
       evidence: r.evidence,
-      href: r.href,
-      askPrompt: r.askPrompt,
+      href: this.listHrefForInsight(r.type, r.evidence, r.href),
+      askPrompt: this.askPromptForInsight(r.type, r.evidence, r.askPrompt),
       createdAt: r.createdAt,
       unread: unread && isRecentInsight(r.createdAt),
     };
+  }
+
+  private listHrefForInsight(type: string, evidence: unknown, stored: string | null): string | null {
+    const href = stored?.trim() || '';
+    const e = evidence && typeof evidence === 'object' && !Array.isArray(evidence)
+      ? (evidence as Record<string, unknown>)
+      : null;
+    if (type === 'SOW_GAP') {
+      const fromEvidence = sowGapHref({
+        classArmId: typeof e?.classArmId === 'string' ? e.classArmId : null,
+        classId: typeof e?.classId === 'string' ? e.classId : null,
+        schemeId: typeof e?.schemeId === 'string' ? e.schemeId : null,
+        weekNumber: typeof e?.weekNumber === 'number' ? e.weekNumber : null,
+        outstandingArms: Array.isArray(e?.outstandingArms) ? (e.outstandingArms as SowGapArm[]) : [],
+      });
+      if (fromEvidence) return fromEvidence;
+      if (href && !isGenericSowHref(href)) return href;
+      return '/dashboard/school/courses';
+    }
+    if (href && href !== '/dashboard/school/overview') return href;
+    if (type === 'ACADEMIC_RISK' || type === 'ATTENDANCE_RISK' || type === 'FEE_ARREARS') {
+      return '/dashboard/school/students';
+    }
+    if (type === 'STUDENT_DROP') {
+      return typeof e?.studentId === 'string' ? `/dashboard/school/students/${e.studentId}` : '/dashboard/school/students';
+    }
+    if (type === 'ADMISSIONS_BACKLOG') return '/dashboard/school/applications';
+    return href || null;
+  }
+
+  private askPromptForInsight(type: string, evidence: unknown, stored: string | null): string | null {
+    if (type !== 'SOW_GAP') return stored;
+    const e = evidence && typeof evidence === 'object' && !Array.isArray(evidence)
+      ? (evidence as Record<string, unknown>)
+      : null;
+    const classLevel = typeof e?.classLevel === 'string' ? e.classLevel : 'this class';
+    const subject = typeof e?.subject === 'string' ? e.subject : 'this subject';
+    const weekNumber = typeof e?.weekNumber === 'number' ? e.weekNumber : 0;
+    const topic = typeof e?.topic === 'string' ? e.topic : 'this topic';
+    if (!weekNumber) return stored;
+    const labels = (rows: unknown): string[] =>
+      Array.isArray(rows)
+        ? rows
+            .map((row) =>
+              row && typeof row === 'object' && !Array.isArray(row) && typeof (row as { label?: unknown }).label === 'string'
+                ? (row as { label: string }).label
+                : null,
+            )
+            .filter((label): label is string => !!label)
+        : [];
+    const outstandingLabels = labels(e?.outstandingArms);
+    const deliveredLabels = labels(e?.deliveredArms);
+    return sowGapAskPrompt({
+      classLevel,
+      subject,
+      weekNumber,
+      topic,
+      outstandingLabels: outstandingLabels.length ? outstandingLabels : [classLevel],
+      deliveredLabels,
+    });
   }
 
   private async ifCreated(
@@ -468,18 +555,21 @@ export class AiInsightsService {
       select: {
         id: true,
         subjectId: true,
-        classLevel: { select: { name: true } },
+        classId: true,
+        classLevelId: true,
+        classLevel: { select: { id: true, name: true } },
         weeks: {
-          where: {
-            isDelivered: false,
-            OR: [{ lessonNoteUrl: null }, { lessonNoteUrl: '' }],
-          },
+          where: { calendarEndDate: { lt: today } },
           orderBy: { weekNumber: 'asc' },
           select: {
             weekNumber: true,
             topic: true,
             calendarEndDate: true,
             lessonNoteUrl: true,
+            isDelivered: true,
+            deliveries: {
+              select: { classArmId: true, classId: true, status: true, lessonNoteUrl: true },
+            },
           },
         },
       },
@@ -494,31 +584,100 @@ export class AiInsightsService {
       : [];
     const subjectName = new Map(subjects.map((s) => [s.id, s.name]));
 
+    const levelIds = [...new Set(schemes.map((s) => s.classLevelId).filter((id): id is string => !!id))];
+    const arms = levelIds.length
+      ? await this.prisma.classArm.findMany({
+          where: { classLevelId: { in: levelIds }, isActive: true },
+          select: { id: true, name: true, classLevelId: true },
+          orderBy: { name: 'asc' },
+        })
+      : [];
+    const armsByLevel = new Map<string, SowGapArm[]>();
+    for (const arm of arms) {
+      const level = schemes.find((s) => s.classLevelId === arm.classLevelId)?.classLevel?.name || '';
+      const list = armsByLevel.get(arm.classLevelId) || [];
+      list.push({
+        classArmId: arm.id,
+        label: `${level} ${arm.name}`.trim(),
+      });
+      armsByLevel.set(arm.classLevelId, list);
+    }
+
     const created: CreatedInsight[] = [];
     for (const scheme of schemes) {
+      const subject = subjectName.get(scheme.subjectId) || 'Subject';
+      const classLabel = scheme.classLevel?.name || 'class';
+      const levelArms = scheme.classLevelId ? armsByLevel.get(scheme.classLevelId) || [] : [];
+
       for (const week of scheme.weeks) {
         if (created.length >= 15) return created;
-        const ended = week.calendarEndDate != null ? week.calendarEndDate < today : false;
-        if (!ended) continue;
 
-        const subject = subjectName.get(scheme.subjectId) || 'Subject';
-        const classLabel = scheme.classLevel?.name || 'class';
-        const title = `${classLabel} ${subject} · week ${week.weekNumber} not delivered`;
+        let outstanding: SowGapArm[] = [];
+        let delivered: SowGapArm[] = [];
+        if (levelArms.length > 0) {
+          const split = partitionArmsForWeek({
+            arms: levelArms,
+            deliveries: week.deliveries,
+            weekIsDelivered: week.isDelivered,
+          });
+          outstanding = split.outstanding;
+          delivered = split.delivered;
+        } else if (!week.isDelivered) {
+          outstanding = [
+            {
+              classId: scheme.classId,
+              label: classLabel,
+            },
+          ];
+        }
+
+        if (outstanding.length === 0) continue;
+
+        const outstandingLabels = outstanding.map((a) => a.label);
+        const deliveredLabels = delivered.map((a) => a.label);
+        const firstId = outstanding.find((a) => a.classArmId)?.classArmId || outstanding.find((a) => a.classId)?.classId || scheme.classId || null;
+        const evidence = {
+          schemeId: scheme.id,
+          weekNumber: week.weekNumber,
+          topic: week.topic,
+          subject,
+          classLevel: classLabel,
+          classLevelId: scheme.classLevelId,
+          classId: firstId,
+          classArmId: outstanding.find((a) => a.classArmId)?.classArmId || null,
+          outstandingArms: outstanding,
+          deliveredArms: delivered,
+          calendarEnd: week.calendarEndDate?.toISOString().slice(0, 10) ?? null,
+        };
+        const href = sowGapHref(evidence) || '/dashboard/school/courses';
         const row = await this.ifCreated(schoolId, {
           type: LOIS_INSIGHT_TYPES.SOW_GAP,
           severity: 'warning',
-          title,
-          summary: `Week ${week.weekNumber} (${week.topic}) has passed on the calendar with no delivery mark or lesson note.`,
-          evidence: {
-            schemeId: scheme.id,
+          title: sowGapTitle({
+            classLevel: classLabel,
+            subject,
+            weekNumber: week.weekNumber,
+            outstandingLabels,
+          }),
+          summary: sowGapSummary({
             weekNumber: week.weekNumber,
             topic: week.topic,
-            subject,
+            outstandingLabels,
+            deliveredLabels,
+          }),
+          evidence,
+          classIds: outstanding
+            .map((a) => a.classArmId || a.classId)
+            .filter((id): id is string => !!id),
+          href,
+          askPrompt: sowGapAskPrompt({
             classLevel: classLabel,
-            calendarEnd: week.calendarEndDate?.toISOString().slice(0, 10) ?? null,
-          },
-          href: '/dashboard/school/overview',
-          askPrompt: `The scheme of work for ${classLabel} ${subject} is missing week ${week.weekNumber}. What is outstanding and who should follow up?`,
+            subject,
+            weekNumber: week.weekNumber,
+            topic: week.topic,
+            outstandingLabels,
+            deliveredLabels,
+          }),
           fingerprint: `SOW_GAP:${scheme.id}:${week.weekNumber}`,
         });
         if (row) created.push(row);

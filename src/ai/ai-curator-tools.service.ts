@@ -13,7 +13,9 @@ import { UserWithContext } from '../auth/types/user-with-context.type';
 import { TimetableCuratorService } from '../timetable/timetable-curator.service';
 import { DEFAULT_LIBRARY_TERM_WEEKS } from '../timetable/timetable-curator.constants';
 import { AgentToolContext, AgentToolResult, toolSource } from './ai-lois-source';
-import { LoisPendingPlanService } from './lois-pending-plan.service';
+import { AiStaffPermissionCheckerService } from './ai-staff-permission-checker.service';
+import { LoisPendingPlanService, type PendingPlanApplyKind } from './lois-pending-plan.service';
+import { payloadClassLabel } from './lois-plan-facing';
 
 @Injectable()
 export class AiCuratorToolsService {
@@ -22,6 +24,7 @@ export class AiCuratorToolsService {
     @Inject(forwardRef(() => TimetableCuratorService))
     private readonly curator: TimetableCuratorService,
     private readonly plans: LoisPendingPlanService,
+    private readonly staffPermissions: AiStaffPermissionCheckerService,
     private readonly moduleRef: ModuleRef,
   ) {}
 
@@ -242,40 +245,76 @@ export class AiCuratorToolsService {
     const userId = context?.userId;
     if (!schoolId || !userId) return { data: { error: 'School and user context are required.' }, usage: null };
 
+    const term = await this.curator.resolveTermId(schoolId, args.termId);
+    if ('error' in term) {
+      return { data: { error: term.error }, usage: null };
+    }
+
     let classId = args.classId;
     let classArmId = args.classArmId;
-    let termId = args.termId;
-    if ((!classId && !classArmId) || !termId) {
+    if (!classId && !classArmId) {
       const snap = await this.curator.inspect(schoolId, {
-        termId,
-        classId,
-        classArmId,
+        termId: term.termId,
         classQuery: args.classQuery,
       });
       if (snap && typeof snap === 'object' && 'error' in snap && (snap as any).error) {
         return { data: snap, usage: null };
       }
-      classId = classId || (snap as any).classId;
-      classArmId = classArmId || (snap as any).classArmId;
-      termId = termId || (snap as any).termId;
-    }
-    if (!termId) {
-      return { data: { error: 'termId is required. Call inspect_scheduling_context first.' }, usage: null };
+      classId = (snap as any).classId;
+      classArmId = (snap as any).classArmId;
     }
 
     const mode = args.mode === 'REPLACE' ? 'REPLACE' : 'FILL_EMPTY';
-    const preview = await this.curator.preview(schoolId, {
-      termId,
-      classId,
-      classArmId,
-      mode,
-    });
+    let preview;
+    try {
+      preview = await this.curator.preview(schoolId, {
+        termId: term.termId,
+        classId,
+        classArmId,
+        mode,
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : '';
+      if (/term not found/i.test(message)) {
+        const fallback = await this.curator.resolveTermId(schoolId);
+        if ('error' in fallback) {
+          return { data: { error: fallback.error }, usage: null };
+        }
+        try {
+          preview = await this.curator.preview(schoolId, {
+            termId: fallback.termId,
+            classId,
+            classArmId,
+            mode,
+          });
+        } catch (retryErr: unknown) {
+          return {
+            data: {
+              error:
+                retryErr instanceof Error && /term not found/i.test(retryErr.message)
+                  ? 'No active term. Create a session and term first.'
+                  : retryErr instanceof Error
+                    ? retryErr.message
+                    : 'Could not generate this timetable.',
+            },
+            usage: null,
+          };
+        }
+      } else {
+        return {
+          data: {
+            error: err instanceof Error ? err.message : 'Could not generate this timetable.',
+          },
+          usage: null,
+        };
+      }
+    }
 
     const summary = [
       `Proposed timetable for ${preview.classLabel}.`,
       `${preview.analysis.totalPeriods} taught periods, ${preview.analysis.freePeriods} free.`,
       preview.analysis.warnings[0] || 'No workload warnings.',
-      'Not saved. The admin must Apply on the card or call apply via plan id.',
+      'Not saved yet. Say apply all, or use Apply on the cards.',
     ].join(' ');
 
     const plan = await this.plans.create({
@@ -287,6 +326,7 @@ export class AiCuratorToolsService {
         termId: preview.termId,
         classId: preview.classId,
         classArmId: preview.classArmId,
+        classLabel: preview.classLabel,
         mode,
         periods: preview.periods,
       },
@@ -347,6 +387,7 @@ export class AiCuratorToolsService {
       };
     }
 
+    const classLabel = await this.schemeClassLabel(schoolId, args.classLevelId, args.subjectId);
     const payload = {
       classLevelId: args.classLevelId,
       classId: args.classId,
@@ -358,9 +399,10 @@ export class AiCuratorToolsService {
       forceOverwrite: !!args.forceOverwrite,
       mergeWeightAgora: args.mergeWeightAgora,
       mergeWeightSchool: args.mergeWeightSchool,
+      classLabel,
     };
 
-    const summary = `Proposed ${mode} scheme for this subject. Not generated yet — Apply on the card to start.`;
+    const summary = `Proposed ${mode} scheme for ${classLabel}. Not generated yet. Say apply, or use Apply on the card.`;
     const plan = await this.plans.create({
       userId,
       schoolId,
@@ -423,10 +465,137 @@ export class AiCuratorToolsService {
         kind: 'SCHEME',
         schemeId: scheme?.id,
         status: scheme?.status,
-        message: 'Scheme generation started. It will appear as a draft when Lois finishes.',
+        classLabel: payload.classLabel,
+        message: payload.classLabel
+          ? `Scheme generation started for ${payload.classLabel}. It will appear as a draft when Lois finishes.`
+          : 'Scheme generation started. It will appear as a draft when Lois finishes.',
       };
     }
 
     throw new BadRequestException('Unknown plan kind.');
+  }
+
+  async applyPendingPlans(args: any, context?: AgentToolContext): Promise<AgentToolResult> {
+    const schoolId = context?.schoolId;
+    const userId = context?.userId;
+    if (!schoolId || !userId) {
+      return { data: { error: 'School and user context are required.' }, usage: null };
+    }
+
+    const scope = args.scope === 'NAMED' ? 'NAMED' : 'ALL_PENDING';
+    const kind: PendingPlanApplyKind =
+      args.kind === 'SCHEME' || args.kind === 'ALL' ? args.kind : 'TIMETABLE';
+    const classQueries = Array.isArray(args.classQueries)
+      ? args.classQueries.filter((q: unknown) => typeof q === 'string')
+      : [];
+
+    const listed = await this.plans.listActive({
+      userId,
+      schoolId,
+      conversationId: context.conversationId,
+      kind,
+    });
+
+    let selected = listed;
+    const unmatchedQueries: string[] = [];
+    if (scope === 'NAMED') {
+      if (classQueries.length === 0) {
+        return {
+          data: {
+            applied: [],
+            failed: [{ classLabel: 'those classes', error: 'Name the class to apply, or say apply all.' }],
+          },
+          usage: null,
+        };
+      }
+      const matched = this.plans.matchByClassQueries(listed, classQueries);
+      selected = matched.matched;
+      unmatchedQueries.push(...matched.unmatchedQueries);
+    }
+
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    const applyContext = {
+      schoolId,
+      userId,
+      user: user ? ({ ...user, currentSchoolId: schoolId } as UserWithContext) : undefined,
+      conversationId: context.conversationId,
+    };
+
+    const applied: Array<{ classLabel: string; message: string }> = [];
+    const failed: Array<{ classLabel: string; error: string }> = [];
+
+    for (const query of unmatchedQueries) {
+      failed.push({ classLabel: query, error: 'No pending plan matches that class in this chat.' });
+    }
+
+    for (const plan of selected) {
+      const classLabel =
+        payloadClassLabel(plan.payload) ||
+        (plan.kind === 'SCHEME' ? 'this scheme' : 'this class');
+      try {
+        await this.staffPermissions.assertLoisPlanWrite({
+          kind: plan.kind,
+          userRole: context.userRole,
+          userId,
+          schoolId,
+        });
+        const result = await this.applyPlan(plan.id, applyContext);
+        applied.push({
+          classLabel: result.classLabel || classLabel,
+          message: result.message,
+        });
+      } catch (err: unknown) {
+        const message =
+          err instanceof Error ? err.message : 'Could not apply this plan. Ask Lois to propose again.';
+        failed.push({ classLabel, error: message });
+      }
+    }
+
+    if (applied.length === 0 && failed.length === 0) {
+      const noun = kind === 'SCHEME' ? 'schemes' : kind === 'ALL' ? 'plans' : 'timetables';
+      return {
+        data: {
+          applied: [],
+          failed: [],
+          message: `There are no pending ${noun} to apply in this chat.`,
+        },
+        usage: null,
+      };
+    }
+
+    const savedLabels = applied.map((row) => row.classLabel).filter(Boolean);
+    const message =
+      applied.length > 0
+        ? `Saved ${savedLabels.join(', ')}.`
+        : 'Nothing was saved.';
+
+    return {
+      data: { applied, failed, message, saved: applied.length > 0 },
+      usage: null,
+      sources: [toolSource('apply_pending_plans', message, '/dashboard/school/timetables')],
+    };
+  }
+
+  private async schemeClassLabel(
+    schoolId: string,
+    classLevelId?: string,
+    subjectId?: string,
+  ): Promise<string> {
+    const [level, subject] = await Promise.all([
+      classLevelId
+        ? this.prisma.classLevel.findFirst({
+            where: { id: classLevelId, schoolId },
+            select: { name: true },
+          })
+        : null,
+      subjectId
+        ? this.prisma.subject.findFirst({
+            where: { id: subjectId, schoolId },
+            select: { name: true },
+          })
+        : null,
+    ]);
+    const bits = [level?.name, subject?.name].filter(Boolean);
+    return bits.length ? bits.join(' · ') : 'this subject';
   }
 }
