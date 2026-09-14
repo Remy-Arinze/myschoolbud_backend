@@ -211,6 +211,11 @@ describe('Lois start-node routing', () => {
       isCuratorWriteIntent('what does JSS 1B have on Thursday'),
     ).toBe(false);
     expect(
+      isCuratorWriteIntent(
+        'What does JSS 1 A already have on Thursday? Do not generate a new timetable — just read what is saved.',
+      ),
+    ).toBe(false);
+    expect(
       selectStartWorker({
         allowedWorkers: ['operations', 'curator'],
         userMessage: 'what does JSS 1B have on Thursday',
@@ -231,6 +236,7 @@ describe('Lois start-node routing', () => {
   it('omits wait_for_apply when bursar graph has no curator node', () => {
     const nodes = adminGraphNodeNames(['finance']);
     expect(nodes).toContain('supervisor');
+    expect(nodes).toContain('facing');
     expect(nodes).toContain('finance');
     expect(nodes).not.toContain('curator');
     expect(nodes).not.toContain('wait_for_apply');
@@ -239,6 +245,7 @@ describe('Lois start-node routing', () => {
   it('includes wait_for_apply only when curator is compiled', () => {
     const nodes = adminGraphNodeNames(['operations', 'curator']);
     expect(nodes).toContain('curator');
+    expect(nodes).toContain('facing');
     expect(nodes).toContain('wait_for_apply');
     expect(nodes).toContain('applied_ack');
   });

@@ -12,11 +12,20 @@ import { type LoisWorker } from '../lois-workers';
 import { loadLangGraph } from './langgraph-loader';
 import { LoisCheckpointerService } from './lois-checkpointer.service';
 import { selectStartWorker } from './lois-routing';
-import { createLoisStreamSink, dedupeSources, type LoisStreamSink } from './lois-stream-sink';
+import { createLoisStreamSink, dedupeSources, withoutUserTokens, type LoisStreamSink } from './lois-stream-sink';
 import type { LoisChatTurn, LoisGraphStateValues, LoisHitlDecision } from './lois-state';
 import { compileAdminGraph, type LoisNodeConfig } from './graphs/admin.graph';
 import { compileTeacherGraph } from './graphs/teacher.graph';
 import { runLoisWorkerLoop } from './worker-node';
+import { runLoisFacingNode } from '../lois-facing-agent';
+import { sanitizeUserFacingText } from '../lois-reply-sanitize';
+
+function isGraphInterruptError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { name?: string; message?: string; interrupts?: unknown };
+  if (Array.isArray(e.interrupts) && e.interrupts.length > 0) return true;
+  return /interrupt/i.test(`${e.name || ''} ${e.message || ''}`);
+}
 
 type CompiledGraph = {
   stream: (input: unknown, config: unknown) => AsyncIterable<unknown> | Promise<AsyncIterable<unknown>>;
@@ -96,9 +105,14 @@ export class LoisRuntimeService {
           userRole,
           conversationId: conversationId || null,
           pageContext,
+          sink: withoutUserTokens(sink),
+        });
+        const spoken = await runLoisFacingNode({
+          state: { messages, lastAssistant: result.assistantText, planId: null },
+          llm: this.llm,
           sink,
         });
-        fullAssistant = result.assistantText;
+        fullAssistant = spoken.lastAssistant || result.assistantText;
       } else {
         fullAssistant = await this.runGraphTurn({
           sink,
@@ -116,7 +130,7 @@ export class LoisRuntimeService {
         conversationId,
         incomingWasNew: !existingConversationId,
         messages,
-        assistantContent: fullAssistant,
+        assistantContent: sanitizeUserFacingText(fullAssistant),
         sink,
         aborted: !!params.abortSignal?.aborted,
       });
@@ -176,7 +190,7 @@ export class LoisRuntimeService {
       const Command = (lg as { Command?: new (args: { resume: unknown }) => unknown }).Command;
       const input = Command ? new Command({ resume: params.decision }) : params.decision;
       const values = await graph.invoke(input, config);
-      const text = values?.lastAssistant?.trim();
+      const text = sanitizeUserFacingText(values?.lastAssistant || '').trim();
       if (params.decision.applied && text) {
         await this.prisma.chatMessage.create({
           data: {
@@ -230,9 +244,14 @@ export class LoisRuntimeService {
         conversationId: params.conversationId,
         pageContext: params.pageContext,
         insightId,
+        sink: withoutUserTokens(params.sink),
+      });
+      const spoken = await runLoisFacingNode({
+        state: { messages: params.messages, lastAssistant: result.assistantText, planId: null },
+        llm: this.llm,
         sink: params.sink,
       });
-      return result.assistantText;
+      return spoken.lastAssistant || result.assistantText;
     }
 
     const lg = await loadLangGraph();
@@ -263,25 +282,26 @@ export class LoisRuntimeService {
     }
 
     try {
-      const values = await graph.invoke(streamInput, { ...config, recursionLimit: 12 });
-      const fromGraph =
-        (values?.lastAssistant || '').trim() ||
-        params.sink.assistantText.trim() ||
-        (await this.readLastAssistant(graph, config));
-      if (fromGraph) return fromGraph;
+      const iterable = await graph.stream(streamInput, { ...config, recursionLimit: 16 });
+      for await (const _chunk of iterable) {
+        if (params.sink.abortSignal?.aborted) break;
+      }
     } catch (err: unknown) {
-      const name = (err as { name?: string })?.name || '';
-      if (name.includes('Interrupt') || name.includes('GraphInterrupt')) {
+      if (isGraphInterruptError(err)) {
         const interruptedText =
           params.sink.assistantText.trim() || (await this.readLastAssistant(graph, config)).trim();
         if (interruptedText) return interruptedText;
       } else {
-        this.logger.warn(`Lois graph invoke failed, falling back to worker: ${err}`);
+        this.logger.warn(`Lois graph stream failed, falling back to worker: ${err}`);
       }
     }
 
     if (params.sink.abortSignal?.aborted) return params.sink.assistantText.trim();
-    if (params.sink.assistantText.trim()) return params.sink.assistantText;
+
+    const fromGraph =
+      params.sink.assistantText.trim() ||
+      (await this.readLastAssistant(graph, config)).trim();
+    if (fromGraph) return fromGraph;
 
     const fallbackWorker = (startWorker ||
       (insightId && allowedWorkers.includes('academic') ? 'academic' : allowedWorkers[0]) ||
@@ -299,9 +319,16 @@ export class LoisRuntimeService {
       conversationId: params.conversationId,
       pageContext: params.pageContext,
       insightId,
-      sink: params.sink,
+      sink: withoutUserTokens(params.sink),
     });
-    if (result.assistantText.trim()) return result.assistantText;
+    if (result.assistantText.trim()) {
+      const spoken = await runLoisFacingNode({
+        state: { messages: params.messages, lastAssistant: result.assistantText, planId: null },
+        llm: this.llm,
+        sink: params.sink,
+      });
+      return spoken.lastAssistant || result.assistantText;
+    }
 
     const closing = "I couldn't finish that reply. Send the question again and I'll try.";
     params.sink.send('token', { token: closing });

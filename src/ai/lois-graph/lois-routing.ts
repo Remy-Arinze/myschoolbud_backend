@@ -52,6 +52,9 @@ export function isAcademicReadIntent(text?: string | null): boolean {
 export function isCuratorWriteIntent(text?: string | null): boolean {
   const t = normalizeIntentText(text);
   if (!t) return false;
+  if (/\b(?:do not|don't|dont|never)\s+(?:generate|creating|create|make|build|draft|propose|auto[- ]?fill)/i.test(t)) {
+    return false;
+  }
   return CURATOR_WRITE_VERB.test(t) && CURATOR_WRITE_ARTIFACT.test(t);
 }
 
@@ -130,12 +133,12 @@ export function adminGraphNodeNames(allowedWorkers: LoisWorker[]): string[] {
   const workers = allowedWorkers.filter((w) =>
     ['operations', 'academic', 'finance', 'admissions', 'curator', 'pedagogy'].includes(w),
   );
-  const nodes = ['supervisor', ...workers];
+  const nodes = ['supervisor', ...workers, 'facing'];
   if (workers.includes('curator')) nodes.push('wait_for_apply', 'applied_ack');
   return nodes;
 }
 
 export function teacherGraphNodeNames(allowedWorkers: LoisWorker[]): string[] {
   const workers = allowedWorkers.filter((w) => w === 'classroom' || w === 'pedagogy');
-  return ['supervisor', ...workers];
+  return ['supervisor', ...workers, 'facing'];
 }

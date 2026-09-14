@@ -66,16 +66,6 @@ export async function runSupervisorNode(params: {
     let messages: LoisChatTurn[] = state.messages;
     if (parsed.reply && !state.lastAssistant) {
       lastAssistant = parsed.reply;
-      if (!sink.addEstimated(parsed.reply.length)) {
-        sink.send('error', {
-          code: 'LOIS_CREDITS',
-          title: 'Credit limit',
-          message:
-            'This reply used the credits available for this request. Add credits or upgrade your plan to continue.',
-        });
-      } else {
-        sink.send('token', { token: parsed.reply });
-      }
       messages = [...state.messages, { role: 'assistant', content: parsed.reply }];
     }
     return { activeWorker: null, lastAssistant, messages, hops: state.hops };

@@ -4,6 +4,8 @@ import { makeLoisStateAnnotation, type LoisGraphStateValues } from '../lois-stat
 import { routeFromSupervisor, runSupervisorNode } from '../supervisor';
 import { appliedAckNode, routeAfterWait, waitForApplyNode } from '../wait-for-apply';
 import type { LoisStreamSink } from '../lois-stream-sink';
+import { withoutUserTokens } from '../lois-stream-sink';
+import { runLoisFacingNode } from '../../lois-facing-agent';
 import { runLoisWorkerLoop, type WorkerLoopResult } from '../worker-node';
 import { AiAgentToolsService } from '../../ai-agent-tools.service';
 import { AiChatPromptService } from '../../ai-chat-prompt.service';
@@ -72,11 +74,19 @@ export async function compileAdminGraph(
         conversationId: config.configurable.conversationId,
         pageContext: state.pageFocus,
         insightId: state.insightId,
-        sink: config.configurable.sink,
+        sink: withoutUserTokens(config.configurable.sink),
       });
       return workerStatePatch(state, worker, result);
     });
   }
+
+  graph.addNode('facing', async (state: LoisGraphStateValues, config: any) => {
+    return runLoisFacingNode({
+      state,
+      llm: config.configurable.llm,
+      sink: config.configurable.sink,
+    });
+  });
 
   const startDest: Record<string, string> = { supervisor: 'supervisor' };
   for (const w of workers) startDest[w] = w;
@@ -86,7 +96,7 @@ export async function compileAdminGraph(
     return 'supervisor';
   }, startDest);
 
-  const supervisorDest: Record<string, unknown> = { end: END };
+  const supervisorDest: Record<string, unknown> = { end: 'facing' };
   for (const w of workers) supervisorDest[w] = w;
   graph.addConditionalEdges('supervisor', (state: LoisGraphStateValues) => routeFromSupervisor(state), supervisorDest);
 
@@ -96,10 +106,16 @@ export async function compileAdminGraph(
       appliedAckNode(state, config.configurable.sink.send.bind(config.configurable.sink)),
     );
     graph.addConditionalEdges('curator', (state: LoisGraphStateValues) => {
-      return state.planId ? 'wait_for_apply' : 'supervisor';
+      return state.planId ? 'facing' : 'supervisor';
+    }, {
+      facing: 'facing',
+      supervisor: 'supervisor',
+    });
+    graph.addConditionalEdges('facing', (state: LoisGraphStateValues) => {
+      return state.planId ? 'wait_for_apply' : 'end';
     }, {
       wait_for_apply: 'wait_for_apply',
-      supervisor: 'supervisor',
+      end: END,
     });
     graph.addConditionalEdges('wait_for_apply', (state: LoisGraphStateValues) => routeAfterWait(state), {
       applied_ack: 'applied_ack',
@@ -107,6 +123,8 @@ export async function compileAdminGraph(
       end: END,
     });
     graph.addEdge('applied_ack', END);
+  } else {
+    graph.addEdge('facing', END);
   }
 
   for (const w of workers) {

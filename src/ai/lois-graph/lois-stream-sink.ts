@@ -55,6 +55,17 @@ export function createLoisStreamSink(
   return sink;
 }
 
+/** Desks may call tools (cards stay visible) but must not speak until the facing agent rewrites. */
+export function withoutUserTokens(sink: LoisStreamSink): LoisStreamSink {
+  return {
+    ...sink,
+    send(event, data) {
+      if (event === 'token') return;
+      sink.send(event, data);
+    },
+  };
+}
+
 export function dedupeSources(sources: LoisSource[]): LoisSource[] {
   const seen = new Set<string>();
   const out: LoisSource[] = [];

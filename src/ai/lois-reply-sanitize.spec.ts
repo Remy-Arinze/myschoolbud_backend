@@ -1,5 +1,7 @@
 import {
   isBrushOffOnly,
+  needsFacingRewrite,
+  sanitizeUserFacingText,
   stripDashboardBrushOff,
 } from './lois-reply-sanitize';
 import { mergeAssistantTurns } from './lois-calendar-range';
@@ -25,5 +27,41 @@ describe('lois-reply-sanitize', () => {
 
   it('keeps a real answer if a later turn is only brush-off', () => {
     expect(mergeAssistantTurns(real, brush)).toBe(real);
+  });
+});
+
+describe('sanitizeUserFacingText', () => {
+  it('turns system role labels into ordinary words', () => {
+    const raw =
+      'You, Arinze Obasi, are the school owner of Beulah High School. You hold the role of SCHOOL_ADMIN with the admin role of school_owner.';
+    const clean = sanitizeUserFacingText(raw);
+    expect(clean).not.toMatch(/SCHOOL_ADMIN/);
+    expect(clean).not.toMatch(/school_owner/);
+    expect(clean).toMatch(/school admin/i);
+    expect(clean).toMatch(/school owner/i);
+  });
+
+  it('strips internal ids', () => {
+    const clean = sanitizeUserFacingText('Student cmtjyqd0c0006ampdqq4ce7qy is in JSS 1 A.');
+    expect(clean).not.toMatch(/cmtjyqd0c0006ampdqq4ce7qy/);
+    expect(clean).toMatch(/JSS 1 A/);
+  });
+});
+
+describe('needsFacingRewrite', () => {
+  it('skips a clean school-facing draft', () => {
+    expect(
+      needsFacingRewrite(
+        'The school owner is Arinze Obasi. There are 26 students and 86 teachers at Beulah High School.',
+      ),
+    ).toBe(false);
+  });
+
+  it('runs the copy desk when role enums leak', () => {
+    expect(
+      needsFacingRewrite(
+        'You hold the role of SCHOOL_ADMIN with the admin role of school_owner.',
+      ),
+    ).toBe(true);
   });
 });

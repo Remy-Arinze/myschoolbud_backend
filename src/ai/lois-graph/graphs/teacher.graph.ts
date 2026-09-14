@@ -3,6 +3,8 @@ import type { LangGraphModule } from '../langgraph-loader';
 import { makeLoisStateAnnotation, type LoisGraphStateValues } from '../lois-state';
 import { routeFromSupervisor, runSupervisorNode } from '../supervisor';
 import { workerStatePatch } from './admin.graph';
+import { runLoisFacingNode } from '../../lois-facing-agent';
+import { withoutUserTokens } from '../lois-stream-sink';
 import { runLoisWorkerLoop } from '../worker-node';
 
 export async function compileTeacherGraph(
@@ -38,11 +40,19 @@ export async function compileTeacherGraph(
         conversationId: config.configurable.conversationId,
         pageContext: state.pageFocus,
         insightId: state.insightId,
-        sink: config.configurable.sink,
+        sink: withoutUserTokens(config.configurable.sink),
       });
       return workerStatePatch(state, worker, result);
     });
   }
+
+  graph.addNode('facing', async (state: LoisGraphStateValues, config: any) => {
+    return runLoisFacingNode({
+      state,
+      llm: config.configurable.llm,
+      sink: config.configurable.sink,
+    });
+  });
 
   const startDest: Record<string, string> = { supervisor: 'supervisor' };
   for (const w of workers) startDest[w] = w;
@@ -51,9 +61,11 @@ export async function compileTeacherGraph(
     return 'supervisor';
   }, startDest);
 
-  const supervisorDest: Record<string, unknown> = { end: END };
+  const supervisorDest: Record<string, unknown> = { end: 'facing' };
   for (const w of workers) supervisorDest[w] = w;
   graph.addConditionalEdges('supervisor', (state: LoisGraphStateValues) => routeFromSupervisor(state), supervisorDest);
+
+  graph.addEdge('facing', END);
 
   for (const w of workers) {
     graph.addEdge(w, 'supervisor');

@@ -1,3 +1,4 @@
+import { sanitizeUserFacingText } from '../lois-reply-sanitize';
 import type { LangGraphModule } from './langgraph-loader';
 import type { LoisGraphStateValues, LoisHitlDecision } from './lois-state';
 
@@ -25,10 +26,11 @@ export function routeAfterWait(state: LoisGraphStateValues): string {
 }
 
 export function appliedAckNode(state: LoisGraphStateValues, send?: (event: string, data: unknown) => void) {
-  const text =
+  const text = sanitizeUserFacingText(
     state.planKind === 'SCHEME'
       ? 'The scheme of work is applied.'
-      : 'The timetable is applied.';
+      : 'The timetable is applied.',
+  );
   send?.('token', { token: text });
   return {
     lastAssistant: text,
