@@ -30,6 +30,11 @@ import { CreateFeeScheduleDto, UpdateFeeScheduleDto } from './dto/fee-schedule.d
 import { CreateKnowledgeDocumentDto } from './dto/knowledge-document.dto';
 import { pickDefined } from './school-settings.utils';
 import { EventType, Prisma } from '@prisma/client';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
+
+const VECTOR_QUEUE_NAME = '{vector}';
+const JOB_GENERATE_EMBEDDING = 'generate-embedding';
 
 export type SettingsSection =
   | 'structure'
@@ -86,7 +91,10 @@ export interface RuntimePolicies {
 
 @Injectable()
 export class SchoolSettingsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @InjectQueue(VECTOR_QUEUE_NAME) private readonly vectorQueue: Queue,
+  ) {}
 
   async ensureDefaults(schoolId: string): Promise<void> {
     if (!schoolId) {
@@ -559,13 +567,27 @@ export class SchoolSettingsService {
 
   // --- Knowledge base ---
   async createKnowledgeDocument(schoolId: string, dto: CreateKnowledgeDocumentDto) {
-    return this.prisma.knowledgeChunk.create({
+    const chunk = await this.prisma.knowledgeChunk.create({
       data: {
         schoolId,
         content: dto.content,
-        metadata: { title: dto.title, source: dto.source ?? 'UPLOAD', type: 'POLICY' },
+        metadata: {
+          type: 'POLICY',
+          title: dto.title,
+          source: dto.source ?? 'UPLOAD',
+          permissions: {
+            roles: ['SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER', 'STUDENT'],
+            isPublic: true,
+          },
+        },
       },
     });
+    await this.vectorQueue.add(
+      JOB_GENERATE_EMBEDDING,
+      { chunkId: chunk.id },
+      { removeOnComplete: true, removeOnFail: { count: 100 } },
+    );
+    return chunk;
   }
 
   async deleteKnowledgeDocument(schoolId: string, id: string) {

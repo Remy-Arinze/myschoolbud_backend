@@ -2,10 +2,9 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { EventEmitter2 } from '@nestjs/event-emitter';
 import { PrismaService } from '../database/prisma.service';
-import { VECTOR_QUEUE_NAME, JOB_INDEX_RECORD } from './vector.processor';
-import { KNOWLEDGE_EVENTS, KnowledgeEntityType } from './knowledge-events.constants';
+import { VECTOR_QUEUE_NAME, JOB_GENERATE_EMBEDDING } from './vector.processor';
+import { isDocumentKnowledgeChunk } from './knowledge-chunk-types';
 
 @Injectable()
 export class KnowledgeIndexingService implements OnModuleInit {
@@ -13,75 +12,63 @@ export class KnowledgeIndexingService implements OnModuleInit {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly eventEmitter: EventEmitter2,
     @InjectQueue(VECTOR_QUEUE_NAME) private readonly vectorQueue: Queue,
   ) {}
 
   async onModuleInit() {
-    this.logger.log('Knowledge Indexing Service initialized (Event-Driven Mode)');
-    // No more Prisma Middleware here. Triggers move to Domain Events/Prisma Extension.
+    this.logger.log('Knowledge Indexing Service initialized (document embeddings only)');
   }
 
   /**
-   * Layer 2 — Scheduled Sync (Safety Net)
-   * Runs daily at 3:00 AM to catch missing or stale embeddings.
+   * Safety net: re-embed handbook/policy chunks that never got a vector.
    */
   @Cron(CronExpression.EVERY_DAY_AT_3AM)
   async handleNightlySync() {
-    this.logger.log('[Safety Net] Starting nightly knowledge sync...');
-    
-    // 1. Sync Schools
-    const schools = await this.prisma.school.findMany({ select: { id: true } });
-    for (const s of schools) {
-      await this.queueIndexing('school', s.id);
+    this.logger.log('[Safety Net] Re-embedding knowledge documents with missing vectors...');
+    const rows = await this.prisma.$queryRawUnsafe<{ id: string }[]>(
+      `SELECT id FROM "KnowledgeChunk"
+       WHERE embedding IS NULL
+         AND content IS NOT NULL
+         AND trim(content) != ''
+         AND (
+           lower(coalesce(metadata->>'type', '')) IN ('policy', 'handbook', 'document')
+           OR lower(coalesce(metadata->>'source', '')) = 'upload'
+         )`,
+    );
+    for (const row of rows) {
+      await this.queueDocumentEmbedding(row.id);
     }
-
-    // 2. Sync Students with missing or old knowledge chunks
-    const students = await this.prisma.student.findMany({ select: { id: true } });
-    for (const s of students) {
-      await this.queueIndexing('student', s.id);
-    }
-
-    // ... Could add logic to only sync if KnowledgeChunk is missing/old ...
-    
-    this.logger.log(`[Safety Net] Dispatched indexing jobs for ${schools.length} schools and ${students.length} students.`);
+    this.logger.log(`[Safety Net] Queued ${rows.length} document embedding job(s).`);
   }
 
-  /**
-   * Layer 1 Helper — Used by services to trigger indexing
-   */
-  async triggerEntitySync(type: KnowledgeEntityType, id: string) {
-    this.eventEmitter.emit(KNOWLEDGE_EVENTS.ENTITY_UPDATED, { type, id });
+  /** Operational entity indexing is retired. Documents are queued on upload. */
+  async triggerEntitySync(_type?: string, _id?: string) {
+    return;
   }
 
-  /**
-   * Helper to queue an indexing job directly (Layer 2)
-   */
-  private async queueIndexing(type: KnowledgeEntityType, id: string) {
+  async queueDocumentEmbedding(chunkId: string) {
     await this.vectorQueue.add(
-      JOB_INDEX_RECORD,
-      { type, id },
-      { priority: 10, removeOnComplete: true }
+      JOB_GENERATE_EMBEDDING,
+      { chunkId },
+      { priority: 10, removeOnComplete: true, removeOnFail: { count: 100 } },
     );
   }
 
   /**
-   * Manual trigger for a school's full sync (e.g. from Admin UI)
+   * Manual trigger: re-embed this school's policy/handbook chunks only.
    */
   async syncSchool(schoolId: string) {
-    this.logger.log(`Manual sync requested for school: ${schoolId}`);
-    
-    // Queue school info
-    await this.queueIndexing('school', schoolId);
-    
-    // Queue teachers
-    const teachers = await this.prisma.teacher.findMany({ where: { schoolId }, select: { id: true } });
-    for (const t of teachers) await this.queueIndexing('teacher', t.id);
-    
-    // Queue classes
-    const classes = await this.prisma.class.findMany({ where: { schoolId }, select: { id: true } });
-    for (const c of classes) await this.queueIndexing('class', c.id);
-
-    return { queued: 1 + teachers.length + classes.length };
+    this.logger.log(`Manual document re-index requested for school: ${schoolId}`);
+    const chunks = await this.prisma.knowledgeChunk.findMany({
+      where: { schoolId },
+      select: { id: true, metadata: true },
+    });
+    let queued = 0;
+    for (const chunk of chunks) {
+      if (!isDocumentKnowledgeChunk(chunk.metadata)) continue;
+      await this.queueDocumentEmbedding(chunk.id);
+      queued += 1;
+    }
+    return { queued };
   }
 }

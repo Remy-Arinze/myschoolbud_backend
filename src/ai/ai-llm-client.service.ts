@@ -29,6 +29,8 @@ export class AiLlmClientService {
   private openai: OpenAI | null = null;
   private embeddingsClient: OpenAI | null = null;
   private readonly model: string;
+  private readonly workerModel: string;
+  private readonly routerModel: string;
   private readonly readOnlyPrisma: PrismaClient;
 
   /** Which provider is active — for log messages only. */
@@ -107,6 +109,9 @@ export class AiLlmClientService {
       );
     }
 
+    this.workerModel = this.configService.get<string>('OPENAI_WORKER_MODEL') || this.model;
+    this.routerModel = this.configService.get<string>('OPENAI_ROUTER_MODEL') || this.model;
+
     // ── Embeddings client — priority: OpenAI → Azure ─────────────────────
     if (openaiKey && openaiKey !== 'your_openai_api_key_here') {
       // Re-use the same standard OpenAI client — no extra instance needed
@@ -167,6 +172,16 @@ export class AiLlmClientService {
 
   getModel(): string {
     return this.model;
+  }
+
+  /** Workers and facing. Falls back to OPENAI_MODEL. */
+  getWorkerModel(): string {
+    return this.workerModel;
+  }
+
+  /** Slim turn-plan classifier. Falls back to OPENAI_MODEL. */
+  getRouterModel(): string {
+    return this.routerModel;
   }
 
   /**

@@ -1,16 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
-import { AiContextRagService } from './ai-context-rag.service';
 import { SystemPromptConfigService } from './system-prompt-config.service';
 import { LoisSkillsService } from './lois-skills.service';
 import { LoisPageContextInput } from './ai-page-context';
-import { SUPERVISOR_BRIEF, toolRoutingBlock } from './lois-workers';
+import { toolRoutingBlock } from './lois-workers';
 import { AGORA_TOOLS } from './agora-chat-tools.definition';
 
 export type ChatPromptOptions = {
   attachedToolNames?: readonly string[];
   workerBrief?: string;
-  supervisorOnly?: boolean;
 };
 
 /**
@@ -30,19 +28,18 @@ export class AiChatPromptService {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly contextRag: AiContextRagService,
     private readonly systemPromptConfig: SystemPromptConfigService,
     private readonly loisSkills: LoisSkillsService,
   ) {}
 
   async getChatPrompt(
-    messages: { role: string; content: string }[],
+    _messages: { role: string; content: string }[],
     userId?: string,
     schoolId?: string,
     pageContext?: LoisPageContextInput | null,
     promptOptions?: ChatPromptOptions,
   ): Promise<{ systemPrompt: string; contextText: string; userRole: string; schoolName: string }> {
-    let contextText = '';
+    const contextText = '';
     let userRole = 'USER';
     let schoolName = '';
     let directContext = '';
@@ -64,7 +61,7 @@ export class AiChatPromptService {
     const sysConfig = await this.systemPromptConfig.get().catch(() => null);
 
     if (!schoolId || !userId) {
-      return { systemPrompt: this.buildPrompt(schoolName, directContext, contextText, userRole, loisConfig, schoolId, sysConfig, [], promptOptions), contextText, userRole, schoolName };
+      return { systemPrompt: this.buildPrompt(schoolName, directContext, userRole, loisConfig, schoolId, sysConfig, [], promptOptions), contextText, userRole, schoolName };
     }
 
     // ── Shared queries — always needed ─────────────────────────────────────
@@ -94,7 +91,7 @@ export class AiChatPromptService {
       }),
     ]);
 
-    if (!user) return { systemPrompt: this.buildPrompt(schoolName, directContext, contextText, userRole, loisConfig, schoolId, sysConfig, [], promptOptions), contextText, userRole, schoolName };
+    if (!user) return { systemPrompt: this.buildPrompt(schoolName, directContext, userRole, loisConfig, schoolId, sysConfig, [], promptOptions), contextText, userRole, schoolName };
 
     userRole = user.role;
 
@@ -135,22 +132,13 @@ export class AiChatPromptService {
       directContext += `\n${focusBlock}\n`;
     }
 
-    // ── RAG context — scoped by role ────────────────────────────────────────
-    const lastUserMessage = messages.slice().reverse().find((m) => m.role === 'user');
-    if (lastUserMessage) {
-      const ragResult = await this.contextRag.findRelevantContext(
-        lastUserMessage.content, schoolId, userRole, 5, { userId },
-      );
-      contextText = ragResult.text;
-    }
-
     this.logger.debug(`[Prompt] Role=${userRole}, School=${schoolName}`);
 
     // ── Active skills for this role ──────────────────────────────────────────
     const activeSkills = await this.loisSkills.getActiveForRole(userRole).catch(() => []);
 
     return {
-      systemPrompt: this.buildPrompt(schoolName, directContext, contextText, userRole, loisConfig, schoolId, sysConfig, activeSkills, promptOptions),
+      systemPrompt: this.buildPrompt(schoolName, directContext, userRole, loisConfig, schoolId, sysConfig, activeSkills, promptOptions),
       contextText,
       userRole,
       schoolName,
@@ -450,7 +438,6 @@ export class AiChatPromptService {
   private buildPrompt(
     schoolName: string,
     directContext: string,
-    contextText: string,
     userRole: string,
     loisConfig: { customGreeting?: string | null; toneNote?: string | null; restrictedTopics?: string | null; schoolContext?: string | null } | null,
     schoolId?: string,
@@ -483,18 +470,15 @@ Introduction rule:
       ? `\n${sysConfig.additionalRules.trim()}`
       : '';
 
-    // Skills block — skip for the tool-less supervisor so it does not pick up tool names
-    const skillsBlock = !promptOptions?.supervisorOnly && activeSkills.length > 0
+    const skillsBlock = activeSkills.length > 0
       ? `\nSKILLS & CAPABILITIES:\nThe following skills have been activated for your role. Follow their instructions precisely.\n\n${
           activeSkills.map((s) => `[${s.name.toUpperCase()} — ${s.category}]\n${s.content}`).join('\n\n')
         }\n`
       : '';
 
     const attachedNames = promptOptions?.attachedToolNames
-      ?? (promptOptions?.supervisorOnly ? [] : AGORA_TOOLS.map((t) => t.function.name));
-    const routingBlock = promptOptions?.supervisorOnly
-      ? SUPERVISOR_BRIEF
-      : toolRoutingBlock(attachedNames);
+      ?? AGORA_TOOLS.map((t) => t.function.name);
+    const routingBlock = toolRoutingBlock(attachedNames);
     const workerBriefBlock = promptOptions?.workerBrief ? `\n${promptOptions.workerBrief}\n` : '';
 
     return `
@@ -503,9 +487,6 @@ ${identityBlock}
 IMPORTANT: Use the following details to answer questions about the current user and school.
 Current Identity Context:
 ${directContext || 'Basic school assistant context.'}
-
-Relevant Knowledge Base Context (from RAG search):
-${contextText || 'No specific knowledge base context found for this query.'}
 
 User Role: ${userRole}
 ${customisation ? `\nSchool Customisations:\n${customisation}\n` : ''}

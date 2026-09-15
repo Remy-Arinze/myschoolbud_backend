@@ -436,23 +436,12 @@ export class AiController {
         if (req.user?.role === UserRole.SCHOOL_ADMIN && req.user?.currentProfileId) {
             await this.subscriptionBilling.assertSchoolAdminNotBillingSuspended(schoolId, req.user.currentProfileId);
         }
-        // Trigger background sync for school, teachers, and classes
-        await this.indexingService.syncSchool(schoolId);
-
-        // Also sync students (limited for now to avoid timeout)
-        const students = await this.prisma.student.findMany({
-            where: { enrollments: { some: { schoolId } } },
-            select: { id: true },
-            take: 100 // Limit for manual trigger
-        });
-
-        for (const s of students) {
-            await this.indexingService.triggerEntitySync('student', s.id);
-        }
+        // Re-embed handbook/policy documents only
+        const result = await this.indexingService.syncSchool(schoolId);
 
         return { 
             success: true, 
-            message: `School knowledge base updated. Indexed school profiles, teachers, and ${students.length} students.` 
+            message: `Queued ${result.queued} knowledge document(s) for embedding.`,
         };
     }
 

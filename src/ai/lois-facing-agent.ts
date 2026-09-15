@@ -6,10 +6,37 @@ import type { LoisStreamSink } from './lois-graph/lois-stream-sink';
 export const FACING_SYSTEM = `You are Lois. Rewrite the draft as the final chat reply a person at a school will read.
 
 Keep every fact, name, date, amount, and count. Do not invent or drop them.
+If the draft has several sections, keep every section.
 Stay Lois — first person, same meaning.
 Never include backend or system wording: role enums, snake_case keys, camelCase field names, tool names, JSON, API paths, database ids, permission keys.
 Use ordinary phrases (school owner, school administrator, teacher, student). Never write SCHOOL_ADMIN, SUPER_ADMIN, school_owner, or similar system labels.
 Return only the reply. No preamble.`;
+
+/** Join every desk draft after the latest user turn so facing does not keep only the last worker. */
+export function stitchWorkerDrafts(messages: LoisChatTurn[], lastAssistant: string): string {
+  let lastUser = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === 'user') {
+      lastUser = i;
+      break;
+    }
+  }
+  const parts: string[] = [];
+  const seen = new Set<string>();
+  const push = (text: string) => {
+    const t = (text || '').trim();
+    if (!t || seen.has(t)) return;
+    seen.add(t);
+    parts.push(t);
+  };
+  if (lastUser >= 0) {
+    for (const m of messages.slice(lastUser + 1)) {
+      if (m.role === 'assistant') push(m.content);
+    }
+  }
+  push(lastAssistant);
+  return parts.join('\n\n');
+}
 
 function messagesThroughLastUser(messages: LoisChatTurn[]): LoisChatTurn[] {
   let lastUser = -1;
@@ -55,7 +82,7 @@ export async function runLoisFacingNode(params: {
   sink: LoisStreamSink;
 }): Promise<Partial<LoisGraphStateValues>> {
   const { state, llm, sink } = params;
-  const draft = (state.lastAssistant || '').trim();
+  const draft = stitchWorkerDrafts(state.messages, state.lastAssistant).trim();
   if (!draft) {
     return { lastAssistant: '', activeWorker: null };
   }
@@ -71,7 +98,7 @@ export async function runLoisFacingNode(params: {
     const openai = llm.getOpenai();
     const stream = await openai.chat.completions.create(
       {
-        model: llm.getModel(),
+        model: llm.getWorkerModel(),
         temperature: 0,
         stream: true,
         stream_options: { include_usage: true },

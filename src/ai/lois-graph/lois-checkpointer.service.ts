@@ -21,6 +21,10 @@ export class LoisCheckpointerService implements OnModuleInit {
     return this.checkpointer;
   }
 
+  private isProduction(): boolean {
+    return (this.config.get<string>('NODE_ENV') || process.env.NODE_ENV) === 'production';
+  }
+
   private async init(): Promise<void> {
     try {
       const dbUrl =
@@ -37,14 +41,21 @@ export class LoisCheckpointerService implements OnModuleInit {
           this.logger.log('Lois graph checkpointer: Postgres (conversationId threads)');
           return;
         } catch (err) {
+          if (this.isProduction()) {
+            this.logger.error(`Postgres checkpointer unavailable in production: ${err}`);
+            throw err instanceof Error ? err : new Error(String(err));
+          }
           this.logger.warn(`Postgres checkpointer unavailable, using in-memory: ${err}`);
         }
+      } else if (this.isProduction()) {
+        throw new Error('DATABASE_URL is required for the Lois graph checkpointer in production');
       }
       const MemorySaver = await loadMemorySaver();
       this.checkpointer = new MemorySaver();
       this.logger.log('Lois graph checkpointer: in-memory (interrupts will not survive restart)');
     } catch (err) {
       this.logger.error(`Failed to initialize LangGraph checkpointer: ${err}`);
+      if (this.isProduction()) throw err;
       this.checkpointer = null;
     }
   }

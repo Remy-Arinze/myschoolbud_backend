@@ -4,6 +4,7 @@ import { MetricsService } from '../common/metrics/metrics.service';
 import { PrismaService } from '../database/prisma.service';
 import { AiLlmClientService } from './ai-llm-client.service';
 import { AiSchoolInsightsService } from './ai-school-insights.service';
+import { isDocumentKnowledgeChunk } from './knowledge-chunk-types';
 
 /**
  * Embeddings + vector context retrieval for Lois (knowledge chunks).
@@ -63,9 +64,14 @@ export class AiContextRagService {
         SELECT content, metadata, (embedding <=> $3::vector) as distance
         FROM "KnowledgeChunk"
         WHERE "schoolId" = $1
+        AND embedding IS NOT NULL
         AND (
           (metadata->'permissions'->'roles')::jsonb ? $2
           OR (metadata->'permissions'->'isPublic')::boolean = true
+        )
+        AND (
+          lower(coalesce(metadata->>'type', '')) IN ('policy', 'handbook', 'document')
+          OR lower(coalesce(metadata->>'source', '')) = 'upload'
         )
         ORDER BY embedding <=> $3::vector
         LIMIT $4
@@ -80,7 +86,17 @@ export class AiContextRagService {
         return { text: '', sources: [] };
       }
 
-      let relevantChunks = chunks.filter((c) => c.distance < 0.85);
+      const parseMeta = (raw: unknown) =>
+        typeof raw === 'string' ? JSON.parse(raw) : raw;
+
+      let relevantChunks = chunks.filter((c) => {
+        if (c.distance >= 0.85) return false;
+        try {
+          return isDocumentKnowledgeChunk(parseMeta(c.metadata));
+        } catch {
+          return false;
+        }
+      });
 
       if (role === 'TEACHER' && options?.userId) {
         const access = await this.schoolInsights.resolveTeacherRagAccess(options.userId, schoolId);
@@ -98,27 +114,24 @@ export class AiContextRagService {
         return { text: '', sources: [] };
       }
 
-      const sources = relevantChunks.map((c) => ({
-        type: c.metadata?.type || 'unknown',
-        relevance: Math.round((1 - c.distance) * 100),
-      }));
+      const sources = relevantChunks.map((c) => {
+        const meta = typeof c.metadata === 'string' ? JSON.parse(c.metadata) : c.metadata;
+        return {
+          type: meta?.type || 'document',
+          relevance: Math.round((1 - c.distance) * 100),
+        };
+      });
 
       const contextParts = relevantChunks.map((c, i) => {
+        const meta = typeof c.metadata === 'string' ? JSON.parse(c.metadata) : c.metadata;
+        const title = meta?.title ? ` — ${meta.title}` : '';
         const sourceLabel =
-          c.metadata?.type === 'student_progress'
-            ? '?? Student Performance'
-            : c.metadata?.type === 'curriculum'
-              ? '?? Curriculum Plan'
-              : c.metadata?.type === 'assessment'
-                ? '?? Teacher Assessment'
-                : c.metadata?.type === 'class_info'
-                  ? '?? Class Info'
-                  : c.metadata?.type === 'school_info'
-                    ? '?? School Profile'
-                    : c.metadata?.type === 'teacher_info'
-                      ? '????? Teacher Profile'
-                      : '?? School Knowledge';
-        return `[Source ${i + 1}: ${sourceLabel} ? ${sources[i].relevance}% relevance]\n${c.content}`;
+          meta?.type === 'handbook'
+            ? 'Handbook'
+            : meta?.type === 'document'
+              ? 'School document'
+              : 'School policy';
+        return `[Source ${i + 1}: ${sourceLabel}${title} — ${sources[i].relevance}% relevance]\n${c.content}`;
       });
 
       return {

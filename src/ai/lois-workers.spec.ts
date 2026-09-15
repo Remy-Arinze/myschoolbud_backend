@@ -8,10 +8,15 @@ import {
 } from './lois-workers';
 import {
   adminGraphNodeNames,
+  desksRequiredForMessage,
+  defaultSpeaker,
   isCuratorApplyIntent,
   isCuratorWriteIntent,
+  nextUnvisitedDesk,
+  runCodeRoute,
   selectStartWorker,
 } from './lois-graph/lois-routing';
+import { emptyThreadMemory } from './lois-thread-memory';
 
 describe('Lois worker allowlists', () => {
   it('covers every AGORA_TOOLS name except banned apply_* names', () => {
@@ -53,6 +58,7 @@ describe('Lois worker allowlists', () => {
     expect(WORKER_BRIEFS.academic).toMatch(/list_lois_insights FIRST/i);
     expect(WORKER_BRIEFS.finance).toMatch(/not fully built/i);
     expect(WORKER_BRIEFS.finance.toLowerCase()).not.toContain('point them to fees');
+    expect(WORKER_BRIEFS.operations).toMatch(/named teacher's class/i);
     expect(WORKER_BRIEFS.operations).toMatch(/teacherClasses/i);
   });
 
@@ -155,19 +161,19 @@ describe('Lois start-node routing', () => {
     ).toBeNull();
   });
 
-  it('starts Curator on timetable/scheme page focus when allowed', () => {
+  it('does not start Curator from timetable/scheme page focus alone', () => {
     expect(
       selectStartWorker({
         allowedWorkers: ['operations', 'curator'],
         pageContext: { type: 'timetable', path: '/dashboard/school/timetables' },
       }),
-    ).toBe('curator');
+    ).toBeNull();
     expect(
       selectStartWorker({
         allowedWorkers: ['operations', 'curator'],
         pageContext: { type: 'scheme', path: '/dashboard/school/courses/abc' },
       }),
-    ).toBe('curator');
+    ).toBeNull();
   });
 
   it('does not start Curator when the admin is not allowed that desk', () => {
@@ -235,7 +241,7 @@ describe('Lois start-node routing', () => {
 
   it('omits wait_for_apply when bursar graph has no curator node', () => {
     const nodes = adminGraphNodeNames(['finance']);
-    expect(nodes).toContain('supervisor');
+    expect(nodes).toContain('route');
     expect(nodes).toContain('facing');
     expect(nodes).toContain('finance');
     expect(nodes).not.toContain('curator');
@@ -248,5 +254,146 @@ describe('Lois start-node routing', () => {
     expect(nodes).toContain('facing');
     expect(nodes).toContain('wait_for_apply');
     expect(nodes).toContain('applied_ack');
+  });
+
+  it('starts Academic first on a mixed attendance + roster + fees ask', () => {
+    const ask =
+      "In one reply: what does attendance look like in JSS 1 A over the last two weeks, who is in Adaeze Okeke's class, and does anyone owe school fees?";
+    const allowed = ['operations', 'academic', 'finance'] as const;
+    expect(desksRequiredForMessage(ask, [...allowed])).toEqual([
+      'academic',
+      'operations',
+      'finance',
+    ]);
+    expect(
+      selectStartWorker({
+        allowedWorkers: [...allowed],
+        userMessage: ask,
+      }),
+    ).toBe('academic');
+    expect(
+      nextUnvisitedDesk({
+        userMessage: ask,
+        allowedWorkers: [...allowed],
+        visitedWorkers: ['academic'],
+      }),
+    ).toBe('operations');
+    expect(
+      nextUnvisitedDesk({
+        userMessage: ask,
+        allowedWorkers: [...allowed],
+        visitedWorkers: ['academic', 'operations'],
+      }),
+    ).toBe('finance');
+    expect(
+      nextUnvisitedDesk({
+        userMessage: ask,
+        allowedWorkers: [...allowed],
+        visitedWorkers: ['academic', 'operations', 'finance'],
+      }),
+    ).toBeNull();
+  });
+
+  it('starts Operations on a named teacher roster ask', () => {
+    expect(
+      selectStartWorker({
+        allowedWorkers: ['operations', 'academic', 'finance'],
+        userMessage: "Who is in Adaeze Okeke's class?",
+      }),
+    ).toBe('operations');
+  });
+
+  it('starts Pedagogy on quiz / lesson-plan asks', () => {
+    expect(
+      selectStartWorker({
+        allowedWorkers: ['operations', 'pedagogy'],
+        userMessage: 'Make me a quiz for JSS 1 Mathematics',
+      }),
+    ).toBe('pedagogy');
+    expect(
+      desksRequiredForMessage('generate a lesson plan for English', ['pedagogy', 'operations']),
+    ).toEqual(['pedagogy']);
+  });
+
+  it('defaults admin to operations and teacher to classroom', () => {
+    expect(defaultSpeaker({ userRole: 'SCHOOL_ADMIN', allowedWorkers: ['operations', 'finance'] })).toBe(
+      'operations',
+    );
+    expect(defaultSpeaker({ userRole: 'TEACHER', allowedWorkers: ['classroom', 'pedagogy'] })).toBe(
+      'classroom',
+    );
+  });
+
+  it('code route uses plannedWorkers when regex is empty, then facing', () => {
+    const base = {
+      messages: [{ role: 'user' as const, content: "What's happening this week?" }],
+      schoolId: 's1',
+      userId: 'u1',
+      role: 'SCHOOL_ADMIN',
+      pageFocus: null,
+      allowedWorkers: ['operations', 'finance'] as const,
+      insightId: null,
+      planId: null,
+      planKind: null,
+      lastAssistant: '',
+      hops: 0,
+      hitl: null,
+      threadMemory: emptyThreadMemory(),
+    };
+    const first = runCodeRoute({
+      ...base,
+      activeWorker: null,
+      visitedWorkers: [],
+      plannedWorkers: ['operations'],
+      allowedWorkers: ['operations', 'finance'],
+    });
+    expect(first.activeWorker).toBe('operations');
+
+    const after = runCodeRoute({
+      ...base,
+      activeWorker: 'operations',
+      visitedWorkers: ['operations'],
+      plannedWorkers: ['operations'],
+      lastAssistant: 'Here is this week.',
+      hops: 1,
+      allowedWorkers: ['operations', 'finance'],
+    });
+    expect(after.activeWorker).toBeNull();
+  });
+
+  it('code route does not default-speaker when nothing is planned', () => {
+    const none = runCodeRoute({
+      messages: [{ role: 'user' as const, content: "What's happening this week?" }],
+      schoolId: 's1',
+      userId: 'u1',
+      role: 'SCHOOL_ADMIN',
+      pageFocus: null,
+      allowedWorkers: ['operations', 'finance'],
+      insightId: null,
+      planId: null,
+      planKind: null,
+      lastAssistant: '',
+      hops: 0,
+      hitl: null,
+      activeWorker: null,
+      visitedWorkers: [],
+      plannedWorkers: [],
+      threadMemory: emptyThreadMemory(),
+    });
+    expect(none.activeWorker).toBeNull();
+  });
+
+  it('hops coded academic then planned finance remainder', () => {
+    const ask =
+      'What does attendance look like in JSS 1 A over the last two weeks, and how many people are in debt in that class?';
+    const allowed = ['operations', 'academic', 'finance'] as const;
+    expect(
+      nextUnvisitedDesk({
+        userMessage: ask,
+        allowedWorkers: [...allowed],
+        visitedWorkers: ['academic'],
+        plannedWorkers: ['academic', 'finance'],
+      }),
+    ).toBe('finance');
   });
 });

@@ -106,20 +106,9 @@ export class VectorProcessor extends WorkerHost {
     }
 
     try {
-      if (type === 'grade') {
-        await this.indexGrade(id);
-      } else if (type === 'attendance') {
-        await this.indexAttendance(id);
-      } else if (type === 'student') {
-        await this.indexStudent(id);
-      } else if (type === 'teacher') {
-        await this.indexTeacher(id);
-      } else if (type === 'class') {
-        await this.indexClass(id);
-      } else if (type === 'assessment') {
-        await this.indexAssessment(id);
-      } else if (type === 'school') {
-        await this.indexSchool(id);
+      if (type === 'grade' || type === 'attendance' || type === 'student' || type === 'teacher' || type === 'class' || type === 'assessment' || type === 'school') {
+        this.logger.debug(`Skipping operational index-record for ${type} ${id}`);
+        return;
       }
     } catch (error: any) {
       this.logger.error(`Failed to index ${type} ${id}: ${error?.message}`);

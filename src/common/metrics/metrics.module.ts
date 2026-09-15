@@ -94,6 +94,16 @@ import { MetricsApiKeyGuard } from './metrics-api-key.guard';
       help: 'Total Lois AI errors',
       labelNames: ['error_type'],
     }),
+    makeCounterProvider({
+      name: 'lois_route_total',
+      help: 'Lois turn-plan route source',
+      labelNames: ['source'],
+    }),
+    makeCounterProvider({
+      name: 'lois_desks_run_total',
+      help: 'Lois specialist desks started per turn',
+      labelNames: ['desk'],
+    }),
 
     // BullMQ Queues
     makeCounterProvider({

@@ -24,6 +24,8 @@ export class MetricsService {
     @InjectMetric('lois_curation_total') public readonly loisCurationTotal: Counter<string>,
     @InjectMetric('lois_tokens_consumed_total') public readonly loisTokensConsumedTotal: Counter<string>,
     @InjectMetric('lois_errors_total') public readonly loisErrorsTotal: Counter<string>,
+    @InjectMetric('lois_route_total') public readonly loisRouteTotal: Counter<string>,
+    @InjectMetric('lois_desks_run_total') public readonly loisDesksRunTotal: Counter<string>,
 
     // BullMQ Queues
     @InjectMetric('bullmq_jobs_added_total') public readonly bullmqJobsAddedTotal: Counter<string>,

@@ -113,6 +113,7 @@ model ChatConversation {
   user     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   messages ChatMessage[]
   pendingPlans LoisPendingPlan[]
+  loisMemory Json?
 
   @@index([userId])
   @@index([schoolId])

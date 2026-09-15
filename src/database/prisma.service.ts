@@ -1,7 +1,6 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { KNOWLEDGE_EVENTS, KnowledgeEntityType } from '../ai/knowledge-events.constants';
 import { DASHBOARD_CACHE_INVALIDATE } from '../common/redis/dashboard-cache.events';
 
 @Injectable()
@@ -18,32 +17,8 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
       this._extendedClient = this.$extends({
         query: {
           $allModels: {
-            async $allOperations({ model, operation, args, query }) {
-              const result = await query(args);
-              
-              const indexableModels: Record<string, KnowledgeEntityType> = {
-                'Student': 'student',
-                'Teacher': 'teacher',
-                'School': 'school',
-                'Class': 'class',
-                'Grade': 'grade',
-                'Attendance': 'attendance',
-                'Assessment': 'assessment',
-              };
-
-              const eventType = indexableModels[model];
-              if (eventType && ['create', 'update', 'upsert', 'updateMany'].includes(operation)) {
-                const id = (result && typeof result === 'object' && 'id' in result) ? (result as any).id : (args as any).where?.id;
-                if (id) {
-                  // We use a timeout to ensure transaction has committed before indexing starts (Eventually Consistent)
-                  setTimeout(() => {
-                    const event = operation === 'create' ? KNOWLEDGE_EVENTS.ENTITY_CREATED : KNOWLEDGE_EVENTS.ENTITY_UPDATED;
-                    // Note: We use the parent closure's eventEmitter
-                    this.eventEmitter.emit(event, { type: eventType, id });
-                  }, 0);
-                }
-              }
-              return result;
+            async $allOperations({ args, query }) {
+              return query(args);
             },
           },
         },
@@ -65,25 +40,6 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
       // Layer 1 — Event-Driven Indexing via Middleware (covers all services)
       this.$use(async (params, next) => {
         const result = await next(params);
-        
-        const indexableModels: Record<string, KnowledgeEntityType> = {
-          'Student': 'student',
-          'Teacher': 'teacher',
-          'School': 'school',
-          'Class': 'class',
-          'Grade': 'grade',
-          'Attendance': 'attendance',
-          'Assessment': 'assessment',
-        };
-
-        const targetType = indexableModels[params.model || ''];
-        if (targetType && ['create', 'update', 'upsert'].includes(params.action)) {
-          const id = (result && typeof result === 'object' && 'id' in result) ? (result as any).id : params.args?.where?.id;
-          if (id) {
-            const event = params.action === 'create' ? KNOWLEDGE_EVENTS.ENTITY_CREATED : KNOWLEDGE_EVENTS.ENTITY_UPDATED;
-            this.eventEmitter.emit(event, { type: targetType, id });
-          }
-        }
 
         const dashboardModels = new Set([
           'Enrollment',

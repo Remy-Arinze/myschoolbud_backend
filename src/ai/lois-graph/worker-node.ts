@@ -10,6 +10,8 @@ import { stripDashboardBrushOff } from '../lois-reply-sanitize';
 import { executeWrappedTool, planFromToolResult, truncateToolPayload, wrapAgoraTools } from './lois-tools';
 import type { LoisChatTurn } from './lois-state';
 import type { LoisStreamSink } from './lois-stream-sink';
+import type { LoisThreadMemory } from '../lois-thread-memory';
+import { formatThreadMemoryBlock } from '../lois-thread-memory';
 
 const MAX_TURNS = 14;
 
@@ -33,6 +35,10 @@ export async function runLoisWorkerLoop(params: {
   pageContext?: LoisPageContextInput | null;
   insightId?: string | null;
   sink: LoisStreamSink;
+  toolNames?: readonly string[];
+  workerBriefOverride?: string;
+  threadMemory?: LoisThreadMemory | null;
+  focusAsk?: string | null;
 }): Promise<WorkerLoopResult> {
   const {
     worker,
@@ -47,21 +53,52 @@ export async function runLoisWorkerLoop(params: {
     pageContext,
     insightId,
     sink,
+    toolNames,
+    workerBriefOverride,
+    threadMemory,
+    focusAsk,
   } = params;
 
-  const toolDefs =
-    worker === 'student' ? toolsForNames(STUDENT_TOOL_NAMES) : toolsForWorkers([worker]);
+  const toolDefs = toolNames
+    ? toolsForNames(toolNames)
+    : worker === 'student'
+      ? toolsForNames(STUDENT_TOOL_NAMES)
+      : toolsForWorkers([worker]);
   const attachedToolNames = toolDefs.map((t) => t.function.name);
+  const otherDeskDrafted = (() => {
+    let lastUser = -1;
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i].role === 'user') {
+        lastUser = i;
+        break;
+      }
+    }
+    if (lastUser < 0) return false;
+    return messages
+      .slice(lastUser + 1)
+      .some((m) => m.role === 'assistant' && (m.content || '').trim());
+  })();
   const workerBrief =
-    worker === 'student'
-      ? WORKER_BRIEFS.pedagogy
+    workerBriefOverride ||
+    (worker === 'student'
+      ? `${WORKER_BRIEFS.pedagogy} If the latest user message does not ask for school data you lack, reply with no tool calls.`
       : `${WORKER_BRIEFS[worker]}${
           insightId ? ` The user asked about briefing insightId=${insightId}.` : ''
-        }`;
+        }${
+          otherDeskDrafted
+            ? ' Another desk already drafted part of this reply. Answer only your job — keep your names, counts, and figures. Do not skip your part because a different class or topic was already mentioned.'
+            : ''
+        } If the latest user message does not ask for school data you lack, reply with no tool calls.`);
 
+  const memoryBlock = formatThreadMemoryBlock(threadMemory);
+  // Mixed message: the supervisor isolated the school clause, so ignore the rest of the turn.
+  const focusLine = (focusAsk || '').trim()
+    ? `Answer only this part of the latest message: "${(focusAsk || '').trim()}". Ignore the rest of that message — do not discuss it and do not apologise for skipping it.`
+    : '';
+  const briefWithFocus = focusLine ? `${focusLine}\n\n${workerBrief}` : workerBrief;
   const { systemPrompt } = await chatPrompt.getChatPrompt(messages, userId, schoolId, pageContext, {
     attachedToolNames,
-    workerBrief,
+    workerBrief: memoryBlock ? `${memoryBlock}\n\n${briefWithFocus}` : briefWithFocus,
   });
 
   const lastUserMessage =
@@ -78,7 +115,7 @@ export async function runLoisWorkerLoop(params: {
   wrapAgoraTools(toolDefs, agentTools, sink, toolContext);
 
   const openai = llm.getOpenai();
-  const model = llm.getModel();
+  const model = llm.getWorkerModel();
   const requestOpts = sink.abortSignal ? { signal: sink.abortSignal } : undefined;
   const currentMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
     { role: 'system', content: systemPrompt },
@@ -101,7 +138,7 @@ export async function runLoisWorkerLoop(params: {
         messages: currentMessages,
         tools: toolDefs as OpenAI.Chat.Completions.ChatCompletionTool[],
         tool_choice: 'auto',
-        temperature: 0.7,
+        temperature: worker === 'pedagogy' || worker === 'student' ? 0.7 : 0.2,
         stream: true,
         stream_options: { include_usage: true },
       },

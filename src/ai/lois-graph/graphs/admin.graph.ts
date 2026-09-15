@@ -1,7 +1,7 @@
 import { ADMIN_GRAPH_WORKERS, type LoisWorker } from '../../lois-workers';
 import type { LangGraphModule } from '../langgraph-loader';
 import { makeLoisStateAnnotation, type LoisGraphStateValues } from '../lois-state';
-import { routeFromSupervisor, runSupervisorNode } from '../supervisor';
+import { routeFromCodeRoute, runCodeRoute } from '../lois-routing';
 import { appliedAckNode, routeAfterWait, waitForApplyNode } from '../wait-for-apply';
 import type { LoisStreamSink } from '../lois-stream-sink';
 import { withoutUserTokens } from '../lois-stream-sink';
@@ -35,6 +35,7 @@ export function workerStatePatch(
     lastAssistant: assistantText,
     messages,
     activeWorker: worker,
+    visitedWorkers: [...new Set([...(state.visitedWorkers || []), worker])],
     planId: result.appliedPending ? null : result.planId ?? state.planId,
     planKind: result.appliedPending ? null : result.planKind ?? state.planKind,
     hops: state.hops + 1,
@@ -51,14 +52,7 @@ export async function compileAdminGraph(
   const workers = ADMIN_GRAPH_WORKERS.filter((w) => allowedWorkers.includes(w));
   const graph: any = new StateGraph(State);
 
-  graph.addNode('supervisor', async (state: LoisGraphStateValues, config: any) => {
-    return runSupervisorNode({
-      state,
-      llm: config.configurable.llm,
-      chatPrompt: config.configurable.chatPrompt,
-      sink: config.configurable.sink,
-    });
-  });
+  graph.addNode('route', async (state: LoisGraphStateValues) => runCodeRoute(state));
 
   for (const worker of workers) {
     graph.addNode(worker, async (state: LoisGraphStateValues, config: any) => {
@@ -75,6 +69,8 @@ export async function compileAdminGraph(
         pageContext: state.pageFocus,
         insightId: state.insightId,
         sink: withoutUserTokens(config.configurable.sink),
+        threadMemory: state.threadMemory,
+        focusAsk: state.focusAsk,
       });
       return workerStatePatch(state, worker, result);
     });
@@ -88,17 +84,17 @@ export async function compileAdminGraph(
     });
   });
 
-  const startDest: Record<string, string> = { supervisor: 'supervisor' };
+  const startDest: Record<string, string> = { route: 'route' };
   for (const w of workers) startDest[w] = w;
 
   graph.addConditionalEdges(START, (state: LoisGraphStateValues) => {
     if (state.activeWorker && workers.includes(state.activeWorker)) return state.activeWorker;
-    return 'supervisor';
+    return 'route';
   }, startDest);
 
-  const supervisorDest: Record<string, unknown> = { end: 'facing' };
-  for (const w of workers) supervisorDest[w] = w;
-  graph.addConditionalEdges('supervisor', (state: LoisGraphStateValues) => routeFromSupervisor(state), supervisorDest);
+  const routeDest: Record<string, unknown> = { end: 'facing' };
+  for (const w of workers) routeDest[w] = w;
+  graph.addConditionalEdges('route', (state: LoisGraphStateValues) => routeFromCodeRoute(state), routeDest);
 
   if (workers.includes('curator')) {
     graph.addNode('wait_for_apply', waitForApplyNode(lg));
@@ -106,10 +102,10 @@ export async function compileAdminGraph(
       appliedAckNode(state, config.configurable.sink.send.bind(config.configurable.sink)),
     );
     graph.addConditionalEdges('curator', (state: LoisGraphStateValues) => {
-      return state.planId ? 'facing' : 'supervisor';
+      return state.planId ? 'facing' : 'route';
     }, {
       facing: 'facing',
-      supervisor: 'supervisor',
+      route: 'route',
     });
     graph.addConditionalEdges('facing', (state: LoisGraphStateValues) => {
       return state.planId ? 'wait_for_apply' : 'end';
@@ -129,7 +125,7 @@ export async function compileAdminGraph(
 
   for (const w of workers) {
     if (w === 'curator') continue;
-    graph.addEdge(w, 'supervisor');
+    graph.addEdge(w, 'route');
   }
 
   return graph.compile({ checkpointer });

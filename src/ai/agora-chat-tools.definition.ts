@@ -11,7 +11,7 @@ export const AGORA_TOOLS: Array<{
     function: {
       name: 'search_semantic',
       description:
-        'Semantic search over the school knowledge base (policies, handbooks, indexed profiles). Use for qualitative questions, not counts or grade lists.',
+        'Semantic search over uploaded school documents (policies, handbooks). Use for qualitative handbook questions, not counts, rosters, or grade lists.',
       parameters: {
         type: 'object',
         properties: {
