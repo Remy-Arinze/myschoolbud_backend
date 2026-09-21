@@ -19,6 +19,7 @@ export class StaffMapper {
       email: admin.email,
       phone: admin.phone,
       role: admin.role,
+      accessTier: admin.accessTier,
       schoolType: admin.schoolType,
       profileImage: admin.profileImage,
       publicId: admin.publicId,

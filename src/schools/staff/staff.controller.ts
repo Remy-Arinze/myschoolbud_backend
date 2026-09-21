@@ -39,6 +39,14 @@ import { AddTeacherDto } from '../dto/add-teacher.dto';
 import { UpdateAdminDto } from '../dto/update-admin.dto';
 import { UpdateTeacherDto } from '../dto/update-teacher.dto';
 import { UpdatePrincipalDto } from '../dto/update-principal.dto';
+import { ChangeAccessTierDto, MakePrincipalDto } from '../dto/change-access-tier.dto';
+import {
+  CreateSchoolRoleTemplateDto,
+  ReapplyRoleTemplateDto,
+  RoleTemplateDto,
+  UpdateSchoolRoleTemplateDto,
+} from '../dto/role-template.dto';
+import { RoleTemplateService } from './permissions/role-template.service';
 import { ConvertTeacherToAdminDto } from '../dto/convert-teacher-to-admin.dto';
 import { AssignPermissionsDto, PermissionResource, PermissionType } from '../dto/permission.dto';
 import {
@@ -68,6 +76,7 @@ export class StaffController {
     private readonly teacherService: TeacherService,
     private readonly teacherSubjectsService: TeacherSubjectsService,
     private readonly permissionService: PermissionService,
+    private readonly roleTemplateService: RoleTemplateService,
     private readonly staffImportService: StaffImportService,
     private readonly authService: AuthService
   ) { }
@@ -398,10 +407,122 @@ export class StaffController {
   async makePrincipal(
     @Param('schoolId') schoolId: string,
     @Param('adminId') adminId: string,
+    @Body() dto: MakePrincipalDto,
     @CurrentUser() user: UserWithContext
   ): Promise<ResponseDto<void>> {
-    await this.adminService.makePrincipal(schoolId, adminId, user);
+    await this.adminService.makePrincipal(schoolId, adminId, dto, user);
     return ResponseDto.ok(undefined, 'Administrator successfully made principal');
+  }
+
+  @Patch('admins/:adminId/access-tier')
+  @RequirePermission(PermissionResource.STAFF, PermissionType.ADMIN)
+  @ApiOperation({
+    summary: 'Grant or remove principal-level access (School Owner only)',
+    description:
+      'Authority lives on the tier, not the job title. Removing principal-level ' +
+      'access requires the access the admin should keep, so nobody is left with ' +
+      'an empty dashboard.',
+  })
+  @ApiResponse({ status: 200, description: 'Access level changed' })
+  @ApiResponse({
+    status: 400,
+    description: 'Already at that tier, no replacement access supplied, or the target is the School Owner',
+  })
+  @ApiResponse({ status: 403, description: 'Only the School Owner can change access levels' })
+  async changeAccessTier(
+    @Param('schoolId') schoolId: string,
+    @Param('adminId') adminId: string,
+    @Body() dto: ChangeAccessTierDto,
+    @CurrentUser() user: UserWithContext
+  ): Promise<ResponseDto<void>> {
+    await this.adminService.changeAccessTier(schoolId, adminId, dto, user);
+    return ResponseDto.ok(
+      undefined,
+      dto.accessTier === 'PRINCIPAL'
+        ? 'Administrator now has principal-level access'
+        : 'Administrator moved to staff-level access',
+    );
+  }
+
+  // Role templates — named access bundles ("what a Bursar here can see").
+  @Get('role-templates')
+  @RequirePermission(PermissionResource.STAFF, PermissionType.READ)
+  @ApiOperation({
+    summary: 'Platform built-in and school-defined access bundles',
+    description:
+      'Read-level, because the Add Admin and permission screens need these to ' +
+      'describe access without asking anyone to rebuild it from tick-boxes.',
+  })
+  async listRoleTemplates(
+    @Param('schoolId') schoolId: string
+  ): Promise<ResponseDto<RoleTemplateDto[]>> {
+    const data = await this.roleTemplateService.list(schoolId);
+    return ResponseDto.ok(data, 'Role templates retrieved successfully');
+  }
+
+  @Post('role-templates')
+  @RequirePermission(PermissionResource.STAFF, PermissionType.ADMIN)
+  @ApiOperation({ summary: 'Create a school-defined access bundle' })
+  @ApiResponse({ status: 409, description: 'A role with that name already exists' })
+  async createRoleTemplate(
+    @Param('schoolId') schoolId: string,
+    @Body() dto: CreateSchoolRoleTemplateDto
+  ): Promise<ResponseDto<unknown>> {
+    const data = await this.roleTemplateService.create(schoolId, dto);
+    return ResponseDto.ok(data, 'Role created');
+  }
+
+  @Patch('role-templates/:templateId')
+  @RequirePermission(PermissionResource.STAFF, PermissionType.ADMIN)
+  @ApiOperation({
+    summary: 'Edit a school-defined access bundle',
+    description:
+      'Does not change anyone who already holds it — holders carry their own ' +
+      'copy of the access. Use reapply to push the change to them.',
+  })
+  @ApiResponse({ status: 400, description: 'Built-in roles cannot be edited' })
+  async updateRoleTemplate(
+    @Param('schoolId') schoolId: string,
+    @Param('templateId') templateId: string,
+    @Body() dto: UpdateSchoolRoleTemplateDto
+  ): Promise<ResponseDto<unknown>> {
+    const data = await this.roleTemplateService.update(schoolId, templateId, dto);
+    return ResponseDto.ok(data, 'Role updated');
+  }
+
+  @Delete('role-templates/:templateId')
+  @RequirePermission(PermissionResource.STAFF, PermissionType.ADMIN)
+  @ApiOperation({
+    summary: 'Delete a school-defined access bundle',
+    description: 'Holders keep their access; they just stop being described by this role.',
+  })
+  async deleteRoleTemplate(
+    @Param('schoolId') schoolId: string,
+    @Param('templateId') templateId: string
+  ): Promise<ResponseDto<void>> {
+    await this.roleTemplateService.remove(schoolId, templateId);
+    return ResponseDto.ok(undefined, 'Role deleted');
+  }
+
+  @Post('role-templates/:templateId/reapply')
+  @RequirePermission(PermissionResource.STAFF, PermissionType.ADMIN)
+  @ApiOperation({
+    summary: 'Push this role\'s current access back onto everyone who holds it',
+    description:
+      'Skips admins whose access was hand-edited since, unless includeCustomised ' +
+      'is set. Principal-level holders are always skipped — their access does not ' +
+      'come from permission rows.',
+  })
+  async reapplyRoleTemplate(
+    @Param('schoolId') schoolId: string,
+    @Param('templateId') templateId: string,
+    @Body() dto: ReapplyRoleTemplateDto
+  ): Promise<ResponseDto<{ updated: number; skippedCustomised: number; skippedPrincipals: number }>> {
+    const data = await this.roleTemplateService.reapply(schoolId, templateId, dto);
+    return ResponseDto.ok(
+      data,
+      `Applied to ${data.updated} ${data.updated === 1 ? 'administrator' : 'administrators'}`,
+    );
   }
 
   @Patch('principal/:principalId')

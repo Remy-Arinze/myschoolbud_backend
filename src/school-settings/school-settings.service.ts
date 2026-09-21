@@ -29,7 +29,7 @@ import { CreateFeeCategoryDto, UpdateFeeCategoryDto } from './dto/fee-category.d
 import { CreateFeeScheduleDto, UpdateFeeScheduleDto } from './dto/fee-schedule.dto';
 import { CreateKnowledgeDocumentDto } from './dto/knowledge-document.dto';
 import { pickDefined } from './school-settings.utils';
-import { EventType, Prisma } from '@prisma/client';
+import { AdminAccessTier, EventType, Prisma } from '@prisma/client';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 
@@ -457,18 +457,48 @@ export class SchoolSettingsService {
     await this.prisma.roleTemplate.delete({ where: { id } });
   }
 
+  /**
+   * Apply a named access bundle to one admin.
+   *
+   * Built-ins (schoolId null) are appliable by every school, which is why the
+   * lookup is not school-scoped alone. Writing `roleTemplateId` is what makes
+   * later drift visible — without it, nobody can tell whether a Bursar still
+   * has Bursar access. Principal-tier admins are refused rather than silently
+   * accepted: their access does not come from permission rows, so wiping and
+   * rewriting rows would change nothing while looking like it had.
+   */
   async applyRoleTemplate(schoolId: string, templateId: string, adminId: string) {
-    const tpl = await this.prisma.roleTemplate.findFirst({ where: { id: templateId, schoolId } });
+    const tpl = await this.prisma.roleTemplate.findFirst({
+      where: { id: templateId, OR: [{ schoolId }, { schoolId: null }] },
+    });
     if (!tpl) throw new NotFoundException('Role template not found');
-    const admin = await this.prisma.schoolAdmin.findFirst({ where: { id: adminId, schoolId } });
+    const admin = await this.prisma.schoolAdmin.findFirst({
+      where: { id: adminId, schoolId },
+      select: { id: true, accessTier: true },
+    });
     if (!admin) throw new NotFoundException('Admin not found');
-    await this.prisma.staffPermission.deleteMany({ where: { adminId } });
-    if (tpl.permissionIds.length) {
-      await this.prisma.staffPermission.createMany({
-        data: tpl.permissionIds.map((permissionId) => ({ adminId, permissionId })),
-        skipDuplicates: true,
-      });
+    if (admin.accessTier === AdminAccessTier.PRINCIPAL) {
+      throw new BadRequestException(
+        'This administrator has principal-level access, which already covers every ' +
+          'screen. Move them to staff-level access first if you want a role to define ' +
+          'what they can see.',
+      );
     }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.staffPermission.deleteMany({ where: { adminId } });
+      if (tpl.permissionIds.length) {
+        await tx.staffPermission.createMany({
+          data: tpl.permissionIds.map((permissionId) => ({ adminId, permissionId })),
+          skipDuplicates: true,
+        });
+      }
+      await tx.schoolAdmin.update({
+        where: { id: adminId },
+        data: { roleTemplateId: tpl.id, templateCustomised: false },
+      });
+    });
+
     return { adminId, permissionIds: tpl.permissionIds };
   }
 

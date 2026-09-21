@@ -13,9 +13,10 @@ import {
   PermissionResource,
   PermissionType,
   StaffPermissionsDto,
-  isPrincipalRole,
+  hasPrincipalAccess,
 } from '../../dto/permission.dto';
 import { UserWithContext } from '../../../auth/types/user-with-context.type';
+import { BUILT_IN_ROLE_TEMPLATES } from './built-in-role-templates';
 
 @Injectable()
 export class PermissionService implements OnModuleInit {
@@ -29,6 +30,76 @@ export class PermissionService implements OnModuleInit {
   async onModuleInit() {
     // Initialize default permissions on module startup
     await this.initializeDefaultPermissions();
+    // Built-in templates reference permission ids, so they must follow the catalog.
+    await this.initializeBuiltInRoleTemplates();
+  }
+
+  /**
+   * Seed the platform's built-in access bundles (schoolId null).
+   *
+   * Keyed on `slug`, so wording can be improved without duplicating rows, and
+   * re-running is harmless. Permission sets are refreshed on every boot: a
+   * built-in is ours to correct, and a school that has customised its copy of
+   * the access is unaffected, because applying a template copies rows rather
+   * than linking to them.
+   */
+  async initializeBuiltInRoleTemplates(): Promise<void> {
+    const catalog = await this.prisma.permission.findMany({
+      select: { id: true, resource: true, type: true },
+    });
+    if (catalog.length === 0) {
+      this.logger.warn('No permissions in catalog; skipping built-in role templates.');
+      return;
+    }
+
+    const idFor = new Map(catalog.map((p) => [`${p.resource}:${p.type}`, p.id]));
+
+    for (const template of BUILT_IN_ROLE_TEMPLATES) {
+      const permissionIds: string[] = [];
+      for (const wanted of template.permissions) {
+        const id = idFor.get(`${wanted.resource}:${wanted.type}`);
+        if (!id) {
+          this.logger.warn(
+            `Built-in template "${template.slug}" wants ${wanted.resource}:${wanted.type}, which is not in the catalog.`,
+          );
+          continue;
+        }
+        permissionIds.push(id);
+      }
+
+      const existing = await this.prisma.roleTemplate.findFirst({
+        where: { schoolId: null, slug: template.slug },
+        select: { id: true },
+      });
+
+      if (existing) {
+        await this.prisma.roleTemplate.update({
+          where: { id: existing.id },
+          data: {
+            name: template.name,
+            description: template.description,
+            suggestedRole: template.suggestedRole,
+            permissionIds,
+            isSystem: true,
+          },
+        });
+        continue;
+      }
+
+      await this.prisma.roleTemplate.create({
+        data: {
+          schoolId: null,
+          slug: template.slug,
+          name: template.name,
+          description: template.description,
+          suggestedRole: template.suggestedRole,
+          permissionIds,
+          isSystem: true,
+        },
+      });
+    }
+
+    this.logger.log(`Built-in role templates ready (${BUILT_IN_ROLE_TEMPLATES.length}).`);
   }
 
   /**
@@ -73,6 +144,8 @@ export class PermissionService implements OnModuleInit {
       adminId: admin.id,
       adminName: `${admin.firstName} ${admin.lastName}`,
       role: admin.role,
+      // The UI must not re-derive authority from the title, so hand it the tier.
+      accessTier: admin.accessTier,
       permissions: admin.permissions.map((sp) => ({
         id: sp.permission.id,
         resource: sp.permission.resource as PermissionResource,
@@ -112,7 +185,7 @@ export class PermissionService implements OnModuleInit {
     }
 
     // Prevent modifying Principal permissions - they have permanent full access
-    if (isPrincipalRole(targetAdmin.role)) {
+    if (hasPrincipalAccess(targetAdmin)) {
       throw new BadRequestException(
         'Principal permissions cannot be modified. Principals have permanent full access to all school resources.'
       );
@@ -137,7 +210,7 @@ export class PermissionService implements OnModuleInit {
       }
 
       // Principals can modify anyone's permissions
-      const callerIsPrincipal = isPrincipalRole(callerAdmin.role);
+      const callerIsPrincipal = hasPrincipalAccess(callerAdmin);
 
       if (!callerIsPrincipal) {
         throw new ForbiddenException(
@@ -185,6 +258,16 @@ export class PermissionService implements OnModuleInit {
             adminId: adminId,
             permissionId: permId,
           })),
+        });
+      }
+
+      // A hand-edit is drift from whatever role they were given. Recording it
+      // lets "re-apply this role" skip them, so a deliberate exception is not
+      // quietly erased the next time someone corrects the role.
+      if (targetAdmin.roleTemplateId) {
+        await tx.schoolAdmin.update({
+          where: { id: adminId },
+          data: { templateCustomised: true },
         });
       }
     });
@@ -381,7 +464,7 @@ export class PermissionService implements OnModuleInit {
 
     for (const admin of admins) {
       // Skip principals - they have permanent full access
-      if (isPrincipalRole(admin.role)) {
+      if (hasPrincipalAccess(admin)) {
         skipped++;
         continue;
       }

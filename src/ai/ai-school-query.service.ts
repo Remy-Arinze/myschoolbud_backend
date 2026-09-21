@@ -31,11 +31,12 @@ export class AiSchoolQueryService {
     const limit = this.clamp(args.limit ?? 15, 1, MAX_LIST);
     const access = await this.teacherAccess(context, schoolId);
 
-    const resolved = await this.resolveClassArgs(schoolId, args, { required: false });
+    const resolved = await this.resolveClassArgs(schoolId, args, { required: false, schoolType: context?.schoolType });
     if (resolved.error) return resolved.error;
 
     const name = args.query?.trim();
     const nameWhere = name ? personNameWhere(name, { middleName: true }) : {};
+    const schoolType = context?.schoolType || null;
     const where: Prisma.EnrollmentWhereInput = {
       schoolId,
       isActive: true,
@@ -46,6 +47,14 @@ export class AiSchoolQueryService {
         : {}),
       ...(access ? { studentId: { in: [...access.studentIds] } } : {}),
       ...(name ? { student: nameWhere as Prisma.StudentWhereInput } : {}),
+      ...(schoolType
+        ? {
+            OR: [
+              { classArm: { classLevel: { type: schoolType } } },
+              { class: { type: schoolType } },
+            ],
+          }
+        : {}),
     };
 
     if (access && access.studentIds.size === 0) {
@@ -301,7 +310,7 @@ export class AiSchoolQueryService {
     context?: AgentToolContext,
   ): Promise<AgentToolResult> {
     const schoolId = this.requireSchool(context);
-    const resolved = await this.resolveClassArgs(schoolId, args, { required: true });
+    const resolved = await this.resolveClassArgs(schoolId, args, { required: true, schoolType: context?.schoolType });
     if (resolved.error) return resolved.error;
 
     await this.assertClassVisible(resolved.classId, resolved.classArmId, context, schoolId);
@@ -519,7 +528,7 @@ export class AiSchoolQueryService {
     context?: AgentToolContext,
   ): Promise<AgentToolResult> {
     const schoolId = this.requireSchool(context);
-    const resolved = await this.resolveClassArgs(schoolId, args, { required: true, singleClass: true });
+    const resolved = await this.resolveClassArgs(schoolId, args, { required: true, singleClass: true, schoolType: context?.schoolType });
     if (resolved.error) return resolved.error;
 
     await this.assertClassVisible(resolved.classId, resolved.classArmId, context, schoolId);
@@ -629,7 +638,7 @@ export class AiSchoolQueryService {
   ): Promise<AgentToolResult> {
     const schoolId = this.requireSchool(context);
     const days = this.clamp(args.days ?? 7, 1, 30);
-    const resolved = await this.resolveClassArgs(schoolId, args, { required: false });
+    const resolved = await this.resolveClassArgs(schoolId, args, { required: false, schoolType: context?.schoolType });
     if (resolved.error) return resolved.error;
     if (resolved.classId || resolved.classArmId) {
       await this.assertClassVisible(resolved.classId, resolved.classArmId, context, schoolId);
@@ -788,7 +797,8 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
     const schoolId = this.requireSchool(context);
     const limit = this.clamp(args.limit ?? 25, 1, 40);
     const access = await this.teacherAccess(context, schoolId);
-    const rows = await this.searchClassDirectory(schoolId, args.query, limit, access);
+    const schoolType = context?.schoolType || null;
+    const rows = await this.searchClassDirectory(schoolId, args.query, limit, access, schoolType);
 
     return {
       data: {
@@ -821,7 +831,7 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
     context?: AgentToolContext,
   ): Promise<AgentToolResult> {
     const schoolId = this.requireSchool(context);
-    const resolved = await this.resolveClassArgs(schoolId, args, { required: true, singleClass: true });
+    const resolved = await this.resolveClassArgs(schoolId, args, { required: true, singleClass: true, schoolType: context?.schoolType });
     if (resolved.error) return resolved.error;
     await this.assertClassVisible(resolved.classId, resolved.classArmId, context, schoolId);
 
@@ -1019,7 +1029,7 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
     const schoolId = this.requireSchool(context);
     const wantsClass = Boolean(args.classId || args.classArmId || args.classQuery);
     const resolved = wantsClass
-      ? await this.resolveClassArgs(schoolId, args, { required: true })
+      ? await this.resolveClassArgs(schoolId, args, { required: true, schoolType: context?.schoolType })
       : { classId: undefined, classArmId: undefined, classLevelId: undefined, label: undefined, type: undefined, error: undefined };
     if (resolved.error) return resolved.error;
     if (wantsClass) {
@@ -1151,7 +1161,7 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
   ): Promise<AgentToolResult> {
     const schoolId = this.requireSchool(context);
     const limit = this.clamp(args.limit ?? 20, 1, MAX_LIST);
-    const resolved = await this.resolveClassArgs(schoolId, args, { required: false });
+    const resolved = await this.resolveClassArgs(schoolId, args, { required: false, schoolType: context?.schoolType });
     if (resolved.error) return resolved.error;
 
     const classFilter: Prisma.EnrollmentWhereInput = {
@@ -1769,6 +1779,7 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
     query: string | undefined,
     limit: number,
     access: TeacherRagAccess | null,
+    schoolType?: string | null,
   ): Promise<
     {
       classId: string | null;
@@ -1784,7 +1795,14 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
   > {
     const [arms, classes, armCounts, classCounts] = await Promise.all([
       this.prisma.classArm.findMany({
-        where: { isActive: true, classLevel: { schoolId, isActive: true } },
+        where: {
+          isActive: true,
+          classLevel: {
+            schoolId,
+            isActive: true,
+            ...(schoolType ? { type: schoolType } : {}),
+          },
+        },
         take: 80,
         orderBy: [{ classLevel: { level: 'asc' } }, { name: 'asc' }],
         select: {
@@ -1797,7 +1815,7 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
         },
       }),
       this.prisma.class.findMany({
-        where: { schoolId, isActive: true },
+        where: { schoolId, isActive: true, ...(schoolType ? { type: schoolType } : {}) },
         take: 40,
         orderBy: { name: 'asc' },
         select: { id: true, name: true, code: true, type: true, classLevel: true },
@@ -1884,7 +1902,7 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
   private async resolveClassArgs(
     schoolId: string,
     args: { classId?: string; classArmId?: string; classQuery?: string },
-    options: { required: boolean; singleClass?: boolean },
+    options: { required: boolean; singleClass?: boolean; schoolType?: string | null },
   ): Promise<{
     classId?: string;
     classArmId?: string;
@@ -1906,6 +1924,9 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
         if (!arm) {
           return { error: { data: { error: 'Class arm not found in this school.' }, usage: null } };
         }
+        if (options.schoolType && arm.classLevel.type !== options.schoolType) {
+          return { error: { data: { error: 'That class is outside your school type.' }, usage: null } };
+        }
         return {
           classId: args.classId,
           classArmId: arm.id,
@@ -1920,6 +1941,9 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
       });
       if (!klass) {
         return { error: { data: { error: 'Class not found in this school.' }, usage: null } };
+      }
+      if (options.schoolType && klass.type !== options.schoolType) {
+        return { error: { data: { error: 'That class is outside your school type.' }, usage: null } };
       }
       return { classId: klass.id, label: klass.name, type: klass.type };
     }
@@ -1937,7 +1961,7 @@ This is a draft only. Lois has not sent this message. Copy it or send it from th
       return {};
     }
 
-    const matches = await this.searchClassDirectory(schoolId, query, 12, null);
+    const matches = await this.searchClassDirectory(schoolId, query, 12, null, options.schoolType);
     if (matches.length === 0) {
       return { error: { data: { error: `No class matched "${query}".`, matches: [] }, usage: null } };
     }

@@ -8,6 +8,11 @@ import { AiSchoolInsightsService } from './ai-school-insights.service';
 import { AiSchoolQueryService } from './ai-school-query.service';
 import { AiStaffPermissionCheckerService } from './ai-staff-permission-checker.service';
 import { AiCuratorToolsService } from './ai-curator-tools.service';
+import {
+  PermissionResource,
+  PermissionType,
+  hasPrincipalAccess,
+} from '../schools/dto/permission.dto';
 
 export type { AgentToolContext };
 
@@ -113,6 +118,8 @@ export class AiAgentToolsService {
       schoolId: context?.schoolId,
     });
 
+    const scopedContext = await this.withAdminScope(context);
+
     switch (toolName) {
       case 'generate_lesson_plan':
         return this.generators.generateLessonPlan({
@@ -201,82 +208,85 @@ export class AiAgentToolsService {
         });
 
       case 'get_school_stats':
-        return this.getSchoolStats(context?.schoolId);
+        return this.getSchoolStats(scopedContext?.schoolId, scopedContext?.schoolType);
 
       case 'list_students':
-        return this.schoolQuery.listStudents(args || {}, context);
+        return this.schoolQuery.listStudents(args || {}, scopedContext);
 
       case 'list_classes':
-        return this.schoolQuery.listClasses(args || {}, context);
+        return this.redactListClasses(
+          await this.schoolQuery.listClasses(args || {}, scopedContext),
+          scopedContext,
+        );
 
       case 'get_student_overview':
-        return this.schoolQuery.getStudentOverview(args || {}, context);
+        return this.schoolQuery.getStudentOverview(args || {}, scopedContext);
 
       case 'get_class_performance':
-        return this.schoolQuery.getClassPerformance(args || {}, context);
+        return this.schoolQuery.getClassPerformance(args || {}, scopedContext);
 
       case 'get_scheme_of_work':
-        return this.schoolQuery.getSchemeOfWork(args || {}, context);
+        return this.schoolQuery.getSchemeOfWork(args || {}, scopedContext);
 
       case 'get_now_in_class':
-        return this.schoolQuery.getNowInClass(args || {}, context);
+        return this.schoolQuery.getNowInClass(args || {}, scopedContext);
 
       case 'get_timetable':
-        return this.schoolQuery.getTimetable(args || {}, context);
+        return this.schoolQuery.getTimetable(args || {}, scopedContext);
 
       case 'list_staff':
-        return this.schoolQuery.listStaff(args || {}, context);
+        return this.schoolQuery.listStaff(args || {}, scopedContext);
 
       case 'who_teaches':
-        return this.schoolQuery.whoTeaches(args || {}, context);
+        return this.schoolQuery.whoTeaches(args || {}, scopedContext);
 
       case 'get_attendance_summary':
-        return this.schoolQuery.getAttendanceSummary(args || {}, context);
+        return this.schoolQuery.getAttendanceSummary(args || {}, scopedContext);
 
       case 'list_fee_debtors':
-        return this.schoolQuery.listFeeDebtors(args || {}, context);
+        return this.schoolQuery.listFeeDebtors(args || {}, scopedContext);
 
       case 'list_admissions':
-        return this.schoolQuery.listAdmissions(args || {}, context);
+        return this.schoolQuery.listAdmissions(args || {}, scopedContext);
 
       case 'get_calendar':
-        return this.schoolQuery.getCalendar(args || {}, context);
+        return this.schoolQuery.getCalendar(args || {}, scopedContext);
 
       case 'get_guardians':
-        return this.schoolQuery.getGuardians(args || {}, context);
+        return this.schoolQuery.getGuardians(args || {}, scopedContext);
 
       case 'list_lois_insights':
-        return this.insights.listForTool(args || {}, context);
+        return this.insights.listForTool(args || {}, scopedContext);
 
       case 'draft_parent_message':
-        return this.schoolQuery.draftParentMessage(args || {}, context);
+        return this.schoolQuery.draftParentMessage(args || {}, scopedContext);
 
       case 'inspect_scheduling_context':
-        return this.curatorTools.inspectScheduling(args || {}, context);
+        return this.curatorTools.inspectScheduling(args || {}, scopedContext);
 
       case 'inspect_curriculum_options':
-        return this.curatorTools.inspectCurriculum(args || {}, context);
+        return this.curatorTools.inspectCurriculum(args || {}, scopedContext);
 
       case 'propose_timetable':
-        return this.curatorTools.proposeTimetable(args || {}, context);
+        return this.curatorTools.proposeTimetable(args || {}, scopedContext);
 
       case 'propose_scheme':
-        return this.curatorTools.proposeScheme(args || {}, context);
+        return this.curatorTools.proposeScheme(args || {}, scopedContext);
 
       case 'apply_pending_plans':
-        return this.curatorTools.applyPendingPlans(args || {}, context);
+        return this.curatorTools.applyPendingPlans(args || {}, scopedContext);
 
       case 'search_semantic':
         return this.searchSemantic(
           args.query,
           args.limit,
-          context?.schoolId,
-          context?.userRole,
-          context?.userId,
+          scopedContext?.schoolId,
+          scopedContext?.userRole,
+          scopedContext?.userId,
         );
 
       case 'get_academic_risk_summary':
-        return this.getAcademicRiskSummary(args, context);
+        return this.getAcademicRiskSummary(args, scopedContext);
 
       default:
         throw new Error(`Unknown tool: ${toolName}`);
@@ -390,16 +400,99 @@ export class AiAgentToolsService {
     };
   }
 
-  async getSchoolStats(schoolId?: string): Promise<AgentToolResult> {
+  async filterLoisToolNames(
+    toolNames: readonly string[],
+    context?: AgentToolContext,
+  ): Promise<string[]> {
+    return this.staffPermissionChecker.filterAllowedToolNames({
+      toolNames,
+      userRole: context?.userRole,
+      userId: context?.userId,
+      schoolId: context?.schoolId,
+    });
+  }
+
+  private async withAdminScope(context?: AgentToolContext): Promise<AgentToolContext | undefined> {
+    if (!context || context.userRole !== 'SCHOOL_ADMIN') return context;
+    const scope = await this.staffPermissionChecker.getSchoolAdminScope(context.userId, context.schoolId);
+    if (!scope) return context;
+    return {
+      ...context,
+      schoolType: scope.schoolType,
+      adminRole: scope.role,
+      adminAccessTier: scope.accessTier,
+      adminId: scope.adminId,
+    };
+  }
+
+  private async redactListClasses(
+    result: AgentToolResult,
+    context?: AgentToolContext,
+  ): Promise<AgentToolResult> {
+    const classes = (result.data as { classes?: Array<Record<string, unknown>> } | undefined)?.classes;
+    if (!Array.isArray(classes) || context?.userRole !== 'SCHOOL_ADMIN' || !context.adminId) {
+      return result;
+    }
+    if (hasPrincipalAccess({ accessTier: context.adminAccessTier })) {
+      return result;
+    }
+
+    const [canSeeStudents, canSeeStaff] = await Promise.all([
+      this.staffPermissionChecker.schoolAdminHasPermission(
+        context.adminId,
+        PermissionResource.STUDENTS,
+        PermissionType.READ,
+      ),
+      this.staffPermissionChecker.schoolAdminHasPermission(
+        context.adminId,
+        PermissionResource.STAFF,
+        PermissionType.READ,
+      ),
+    ]);
+
+    return {
+      ...result,
+      data: {
+        ...result.data,
+        classes: classes.map((row) => ({
+          ...row,
+          enrollmentCount: canSeeStudents ? row.enrollmentCount : undefined,
+          formTeacher: canSeeStudents || canSeeStaff ? row.formTeacher : undefined,
+        })),
+      },
+    };
+  }
+
+  async getSchoolStats(schoolId?: string, schoolType?: string | null): Promise<AgentToolResult> {
     if (!schoolId) return { data: { error: 'School ID is required' }, usage: null };
 
     const [classCount, classArmCount, teacherCount, studentCount] = await Promise.all([
-      this.prisma.class.count({ where: { schoolId } }),
-      this.prisma.classArm.count({
-        where: { isActive: true, classLevel: { schoolId, isActive: true } },
+      this.prisma.class.count({
+        where: { schoolId, ...(schoolType ? { type: schoolType } : {}) },
       }),
-      this.prisma.teacher.count({ where: { schoolId } }),
-      this.prisma.enrollment.count({ where: { schoolId, isActive: true } }),
+      this.prisma.classArm.count({
+        where: {
+          isActive: true,
+          classLevel: { schoolId, isActive: true, ...(schoolType ? { type: schoolType } : {}) },
+        },
+      }),
+      this.prisma.teacher.count({
+        where: { schoolId, ...(schoolType ? { OR: [{ schoolType }, { schoolType: null }] } : {}) },
+      }),
+      this.prisma.enrollment.count({
+        where: {
+          schoolId,
+          isActive: true,
+          ...(schoolType
+            ? {
+                OR: [
+                  { classArm: { classLevel: { type: schoolType } } },
+                  { class: { type: schoolType } },
+                ],
+              }
+            : {}),
+        },
+      }),
     ]);
 
     return {

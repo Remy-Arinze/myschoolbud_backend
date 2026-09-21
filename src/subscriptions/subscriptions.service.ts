@@ -1,6 +1,6 @@
 import { Injectable, BadRequestException, NotFoundException, ForbiddenException, Logger } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
-import { isPrincipalRole } from '../schools/dto/permission.dto';
+import { hasPrincipalAccess } from '../schools/dto/permission.dto';
 import { UserWithContext } from '../auth/types/user-with-context.type';
 import {
   SubscriptionDto,
@@ -149,10 +149,10 @@ export class SubscriptionsService {
 
     const admin = await this.prisma.schoolAdmin.findUnique({
       where: { id: user.currentProfileId },
-      select: { role: true },
+      select: { accessTier: true },
     });
 
-    if (!admin || !isPrincipalRole(admin.role)) {
+    if (!admin || !hasPrincipalAccess(admin)) {
       throw new ForbiddenException('Only school leaders (Owner, Principal, Head Teacher) can manage subscriptions');
     }
   }
@@ -162,9 +162,9 @@ export class SubscriptionsService {
     if (user.role !== 'SCHOOL_ADMIN' || !user.currentProfileId) return false;
     const admin = await this.prisma.schoolAdmin.findUnique({
       where: { id: user.currentProfileId },
-      select: { role: true },
+      select: { accessTier: true },
     });
-    return !!admin && isPrincipalRole(admin.role);
+    return !!admin && hasPrincipalAccess(admin);
   }
 
   /**

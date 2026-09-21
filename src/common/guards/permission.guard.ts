@@ -6,7 +6,7 @@ import { PERMISSION_KEY } from '../decorators/permission.decorator';
 import {
   PermissionResource,
   PermissionType,
-  isPrincipalRole,
+  hasPrincipalAccess,
 } from '../../schools/dto/permission.dto';
 
 @Injectable()
@@ -49,14 +49,16 @@ export class PermissionGuard implements CanActivate {
           userId: user.id,
           schoolId: schoolId,
         },
+        select: { id: true, accessTier: true },
       });
 
       if (!admin) {
         throw new ForbiddenException('Admin profile not found');
       }
 
-      // Principal has all permissions (exact role match for security)
-      if (isPrincipalRole(admin.role)) {
+      // Principal-tier admins bypass the permission tables. Read the stored
+      // tier, never the title — a typed title must not decide authority.
+      if (hasPrincipalAccess(admin)) {
         return true;
       }
 

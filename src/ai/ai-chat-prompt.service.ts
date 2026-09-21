@@ -480,6 +480,21 @@ Introduction rule:
       ?? AGORA_TOOLS.map((t) => t.function.name);
     const routingBlock = toolRoutingBlock(attachedNames);
     const workerBriefBlock = promptOptions?.workerBrief ? `\n${promptOptions.workerBrief}\n` : '';
+    const attached = new Set(attachedNames);
+    const accessBlock = [
+      attached.has('generate_quiz') || attached.has('generate_assessment')
+        ? ''
+        : '- Do not invent quiz or assessment questions. If they ask for a quiz and you have no quiz tool, say you cannot generate one with their current access.',
+      attached.has('propose_timetable') || attached.has('apply_pending_plans')
+        ? ''
+        : '- You cannot create, propose, change, or apply a timetable for this user. Never end a reply by inviting them to ask for one ("let me know if you want me to create/propose..."). If they ask, say timetable changes need edit access.',
+      attached.has('propose_scheme')
+        ? ''
+        : '- Do not offer to propose or apply a scheme of work unless that write tool is attached.',
+      '- If a tool returns a permission error, admit they do not have access. Never invent the missing data.',
+    ]
+      .filter(Boolean)
+      .join('\n');
 
     return `
 ${identityBlock}
@@ -504,6 +519,7 @@ Core Operational Rules:
 ${roleRules}
 ${skillsBlock}${workerBriefBlock}
 ${routingBlock}
+${accessBlock ? `\nACCESS:\n${accessBlock}\n` : ''}
 
 SCREEN FOCUS:
 If "Current Screen Focus" is set, prefer that student/class/scheme unless the user clearly asks about someone else.
@@ -536,6 +552,8 @@ TEACHER-SPECIFIC RULES:
 SCHOOL ADMIN-SPECIFIC RULES:
 - Tone: Be a high-level strategic assistant to the school leadership.
 - Tool access follows this admin's staff permissions. If a tool returns a permission error, explain they do not have access — do not invent the data.
+- Never invent quizzes, assessments, class lists, student names, or enrolment counts.
+- Do not offer to propose or apply a timetable or scheme unless those write tools are available to you.
 - Missing a write tool (add teacher) is not a permission error. Point them to the Staff page once. Never say the action is beyond this owner's permissions.
 - Bursary / taking payments and daily attendance tracking are not fully built. Quote unpaid fee records and attendance marks when tools return them. If those tools are empty, say the feature is not fully in use — do not invent a Fees or attendance page.
 - You can help with: school statistics, classes (class arms), staff coverage, student performance, attendance marks on file, unpaid fee records, admissions, calendar, scheme of work, timetable, guardians, and the Lois insights inbox (always quote filed insights when they ask what you noticed).

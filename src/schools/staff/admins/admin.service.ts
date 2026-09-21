@@ -16,11 +16,21 @@ import { StaffValidatorService } from '../../shared/staff-validator.service';
 import { SubscriptionsService } from '../../../subscriptions/subscriptions.service';
 import { AddAdminDto } from '../../dto/add-admin.dto';
 import { UpdateAdminDto } from '../../dto/update-admin.dto';
+import { ChangeAccessTierDto, MakePrincipalDto } from '../../dto/change-access-tier.dto';
 import { CloudinaryService } from '../../../storage/cloudinary/cloudinary.service';
-import { PermissionResource, PermissionType, isPrincipalRole } from '../../dto/permission.dto';
+import {
+  AdminAccessTier,
+  PermissionResource,
+  PermissionType,
+  hasPrincipalAccess,
+  isPrincipalRole,
+  isSchoolOwnerRole,
+  canonicalizeUniqueTitle,
+} from '../../dto/permission.dto';
 import { UserWithContext } from '../../../auth/types/user-with-context.type';
 import { generateSecurePasswordHash } from '../../../common/utils/password.utils';
 import { NotificationService } from '../../../notification/notification.service';
+import { RoleTemplateService } from '../permissions/role-template.service';
 
 /**
  * Service for managing school administrators
@@ -41,6 +51,7 @@ export class AdminService {
     private readonly cloudinaryService: CloudinaryService,
     private readonly subscriptionsService: SubscriptionsService,
     private readonly notificationService: NotificationService,
+    private readonly roleTemplates: RoleTemplateService,
   ) { }
 
   /**
@@ -70,26 +81,57 @@ export class AdminService {
     const sanitizedRole = adminData.role.trim();
     const roleLower = sanitizedRole.toLowerCase();
 
-    // Validate role - use centralized isPrincipalRole function
-    const isPrincipal = isPrincipalRole(sanitizedRole);
+    // Authority comes from the request, never from the title. Typing "Principal"
+    // no longer grants anything — the caller has to ask for the tier deliberately.
+    const isPrincipal = adminData.accessTier === AdminAccessTier.PRINCIPAL;
 
-    // Check authorization for principal roles
-    if (isPrincipal) {
-      // Get the requesting admin's profile in this school
+    // Least privilege: access is stated, never inherited. The old behaviour —
+    // omit `permissions` and silently receive READ on every screen in the school
+    // — meant a new bursar could read grades, staff records and settings on day
+    // one because the form did not ask. Principals are exempt: the tier itself
+    // is the grant, so there is nothing to state.
+    let requestedPermissionIds: string[] = [];
+    if (!isPrincipal) {
+      if (adminData.roleTemplateId) {
+        requestedPermissionIds = await this.roleTemplates.permissionIdsForTemplate(
+          school.id,
+          adminData.roleTemplateId,
+        );
+      } else if (Array.isArray(adminData.permissions)) {
+        requestedPermissionIds = await this.permissionIdsFor(adminData.permissions);
+      } else {
+        throw new BadRequestException(
+          'Choose what this administrator can see. Pick a role, or tick the access ' +
+            'they need — send an empty list only if they should have no dashboard access.',
+        );
+      }
+    }
+
+    // The seat rules still key off the title, so a titled-but-STAFF principal
+    // cannot quietly occupy the school's one Principal seat either.
+    if (isPrincipal || isPrincipalRole(sanitizedRole)) {
       const requestingAdmin = await this.prisma.schoolAdmin.findFirst({
         where: { userId: requestingUser.id, schoolId: school.id },
       });
 
-      if (!requestingAdmin) {
+      if (!requestingAdmin && requestingUser.role !== 'SUPER_ADMIN') {
         throw new ForbiddenException('You do not have an admin profile in this school');
       }
 
-      const requestingRole = (requestingAdmin.role || '').toLowerCase().trim();
-      if (!isPrincipalRole(requestingRole)) {
-        throw new ForbiddenException('Only principal-level administrators can assign principal-level roles');
+      if (isPrincipal) {
+        this.staffValidator.assertCanGrantPrincipalTier(
+          requestingAdmin?.role,
+          requestingUser.role,
+        );
       }
 
-      await this.staffValidator.validatePrincipalRole(school.id, sanitizedRole);
+      this.staffValidator.assertCanAssignPrincipalTitle(
+        requestingAdmin?.role,
+        sanitizedRole,
+        requestingUser.role,
+      );
+
+      await this.staffValidator.validateUniqueCanonicalTitle(school.id, sanitizedRole);
     }
 
     // Validate that the role is not teaching-related
@@ -167,6 +209,8 @@ export class AdminService {
             email: adminData.email.trim().toLowerCase(),
             phone: adminData.phone.trim().replace(/\s+/g, ''),
             role: normalizedRole,
+            accessTier: isPrincipal ? AdminAccessTier.PRINCIPAL : AdminAccessTier.STAFF,
+            roleTemplateId: isPrincipal ? null : adminData.roleTemplateId || null,
             profileImage: adminData.profileImage || null,
             schoolType: adminData.schoolType?.trim() || null,
             userId: adminUser.id,
@@ -210,19 +254,19 @@ export class AdminService {
     // Principals automatically have full access via PermissionGuard, so skip for them
     if (!isPrincipal) {
       try {
-        if (adminData.permissions && adminData.permissions.length > 0) {
-          // Use custom permissions provided in the request
-          this.logger.log(
-            `[addAdmin] Assigning ${adminData.permissions.length} custom permissions to admin ${result.admin.id}`
-          );
-          await this.assignCustomPermissions(result.admin.id, adminData.permissions);
-        } else {
-          // Fall back to default READ permissions for all resources
-          this.logger.log(
-            `[addAdmin] No custom permissions, assigning default READ permissions to admin ${result.admin.id}`
-          );
-          await this.assignDefaultReadPermissions(result.admin.id);
+        if (requestedPermissionIds.length > 0) {
+          await this.prisma.staffPermission.createMany({
+            data: requestedPermissionIds.map((permissionId) => ({
+              adminId: result.admin.id,
+              permissionId,
+            })),
+            skipDuplicates: true,
+          });
         }
+        this.logger.log(
+          `[addAdmin] Assigned ${requestedPermissionIds.length} permission rows to admin ${result.admin.id}` +
+            (adminData.roleTemplateId ? ` from template ${adminData.roleTemplateId}` : ''),
+        );
       } catch (error) {
         this.logger.error(
           'Failed to assign permissions:',
@@ -267,11 +311,12 @@ export class AdminService {
     }
 
     // PREVENT UNAUTHORIZED MODIFICATION OF PRINCIPAL ACCOUNTS
-    if (isPrincipalRole(admin.role)) {
+    if (hasPrincipalAccess(admin)) {
       const requestingAdmin = await this.prisma.schoolAdmin.findFirst({
         where: { userId: requestingUser.id, schoolId: school.id },
+        select: { id: true, role: true, accessTier: true },
       });
-      if (!requestingAdmin || !isPrincipalRole(requestingAdmin.role)) {
+      if (!requestingAdmin || !hasPrincipalAccess(requestingAdmin)) {
         throw new ForbiddenException('Only principal-level administrators can modify principal accounts');
       }
     }
@@ -286,41 +331,29 @@ export class AdminService {
       });
     }
 
-    // Validate role if being updated - use centralized isPrincipalRole function
+    // Renaming a title never changes authority — that is the whole point of the
+    // tier. Use PATCH admins/:adminId/access-tier to promote or demote, which
+    // forces a replacement permission set so nobody lands on zero access.
+    // The seat rules below still apply, so titles cannot collide.
     if (updateData.role) {
       const sanitizedRole = updateData.role.trim();
-      const isPrincipal = isPrincipalRole(sanitizedRole);
 
-      if (isPrincipal) {
-        // Get the requesting admin's profile in this school
+      if (isPrincipalRole(sanitizedRole)) {
         const requestingAdmin = await this.prisma.schoolAdmin.findFirst({
           where: { userId: requestingUser.id, schoolId: school.id },
         });
 
-        if (!requestingAdmin) {
+        if (!requestingAdmin && requestingUser.role !== 'SUPER_ADMIN') {
           throw new ForbiddenException('You do not have an admin profile in this school');
         }
 
-        const requestingRole = (requestingAdmin.role || '').toLowerCase().trim();
-        if (!isPrincipalRole(requestingRole)) {
-          throw new ForbiddenException('Only principal-level administrators can assign principal-level roles');
-        }
+        this.staffValidator.assertCanAssignPrincipalTitle(
+          requestingAdmin?.role,
+          sanitizedRole,
+          requestingUser.role,
+        );
 
-        // Check if another principal role exists (excluding current admin)
-        const normalizedRole = sanitizedRole.toLowerCase();
-        const existingPrincipal = await this.prisma.schoolAdmin.findFirst({
-          where: {
-            schoolId: school.id,
-            id: { not: adminId },
-            role: { equals: normalizedRole, mode: 'insensitive' },
-          },
-        });
-
-        if (existingPrincipal) {
-          throw new BadRequestException(
-            `School already has a ${sanitizedRole} role. Only one principal-level role is allowed per school.`
-          );
-        }
+        await this.staffValidator.validateUniqueCanonicalTitle(school.id, sanitizedRole, adminId);
       }
     }
 
@@ -366,8 +399,7 @@ export class AdminService {
     }
 
     // Rule: school_owner can NEVER be deleted
-    const targetRole = (targetAdmin.role || '').toLowerCase().trim();
-    if (targetRole === 'school_owner') {
+    if (isSchoolOwnerRole(targetAdmin.role)) {
       throw new ForbiddenException('School owner cannot be deleted');
     }
 
@@ -380,10 +412,11 @@ export class AdminService {
       throw new ForbiddenException('You do not have an admin profile in this school');
     }
 
-    const requestingRole = (requestingAdmin.role || '').toLowerCase().trim();
-    const isRequestingSchoolOwner = requestingRole === 'school_owner';
-    const isRequestingPrincipalLevel = isPrincipalRole(requestingAdmin.role);
-    const isTargetPrincipalLevel = isPrincipalRole(targetAdmin.role);
+    // Owner is a seat (identified by a title only the system writes); "principal
+    // level" is authority, which now comes from the tier.
+    const isRequestingSchoolOwner = isSchoolOwnerRole(requestingAdmin.role);
+    const isRequestingPrincipalLevel = hasPrincipalAccess(requestingAdmin);
+    const isTargetPrincipalLevel = hasPrincipalAccess(targetAdmin);
 
     // Rule: Only school_owner can delete principal-level roles
     if (isTargetPrincipalLevel && !isRequestingSchoolOwner) {
@@ -408,9 +441,194 @@ export class AdminService {
   }
 
   /**
-   * Make an admin the principal (switches current principal to admin)
+   * Change who bypasses the permission system.
+   *
+   * Promotion grants full access. Demotion has to say what the person keeps —
+   * the old title-edit route silently left a demoted principal with zero rows
+   * and an empty dashboard, so a replacement set is required here.
+   *
+   * Tier and permissions land in one transaction: a half-applied demotion is
+   * exactly the lockout this is meant to prevent.
    */
-  async makePrincipal(schoolId: string, adminId: string, requestingUser: UserWithContext): Promise<void> {
+  async changeAccessTier(
+    schoolId: string,
+    adminId: string,
+    dto: ChangeAccessTierDto,
+    requestingUser: UserWithContext,
+  ): Promise<void> {
+    const school = await this.schoolRepository.findById(schoolId);
+    if (!school) {
+      throw new BadRequestException('School not found');
+    }
+
+    const requestingAdmin = await this.prisma.schoolAdmin.findFirst({
+      where: { userId: requestingUser.id, schoolId: school.id },
+      select: { id: true, role: true, accessTier: true },
+    });
+
+    if (!requestingAdmin && requestingUser.role !== 'SUPER_ADMIN') {
+      throw new ForbiddenException('You do not have an admin profile in this school');
+    }
+
+    // Both directions are owner-only. Granting a bypass and taking one away are
+    // equally consequential, and a Principal must not be able to unseat a peer.
+    this.staffValidator.assertCanGrantPrincipalTier(
+      requestingAdmin?.role,
+      requestingUser.role,
+    );
+
+    const target = await this.prisma.schoolAdmin.findFirst({
+      where: { id: adminId, schoolId: school.id },
+      select: { id: true, role: true, accessTier: true },
+    });
+    if (!target) {
+      throw new BadRequestException('Administrator not found in this school');
+    }
+
+    // Changing your own tier is how you lock yourself out of your own school.
+    if (requestingAdmin && requestingAdmin.id === target.id) {
+      throw new BadRequestException('You cannot change your own access level');
+    }
+
+    // The owner seat is the floor of the hierarchy; nothing may demote it.
+    if (isSchoolOwnerRole(target.role) && dto.accessTier !== AdminAccessTier.PRINCIPAL) {
+      throw new BadRequestException('The School Owner cannot be moved off principal-level access');
+    }
+
+    if (target.accessTier === dto.accessTier) {
+      throw new BadRequestException(
+        dto.accessTier === AdminAccessTier.PRINCIPAL
+          ? 'This administrator already has principal-level access'
+          : 'This administrator is already a staff-level administrator',
+      );
+    }
+
+    const newTitle = dto.role?.trim();
+    if (newTitle) {
+      // Titles carry no access, but the seat rules still apply so two people
+      // cannot both be called Principal.
+      if (isPrincipalRole(newTitle)) {
+        this.staffValidator.assertCanAssignPrincipalTitle(
+          requestingAdmin?.role,
+          newTitle,
+          requestingUser.role,
+        );
+      }
+      await this.staffValidator.validateUniqueCanonicalTitle(school.id, newTitle, target.id);
+    }
+
+    const toStaff = dto.accessTier === AdminAccessTier.STAFF;
+    const replacement = toStaff
+      ? await this.resolveReplacementAccess(school.id, dto)
+      : null;
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.schoolAdmin.update({
+        where: { id: target.id },
+        data: {
+          accessTier: dto.accessTier,
+          ...(newTitle ? { role: this.normalizeRoleName(newTitle) } : {}),
+          ...(replacement
+            ? {
+                roleTemplateId: replacement.roleTemplateId,
+                templateCustomised: replacement.customised,
+              }
+            // Promotion: a principal is not described by "Bursar access" any
+            // more, so drop the link rather than leave a role that no longer
+            // says anything true about what they can reach.
+            : { roleTemplateId: null, templateCustomised: false }),
+        },
+      });
+
+      if (!replacement) return;
+
+      // Replace, not merge: the school named the access this person should have.
+      await tx.staffPermission.deleteMany({ where: { adminId: target.id } });
+      if (replacement.permissionIds.length > 0) {
+        await tx.staffPermission.createMany({
+          data: replacement.permissionIds.map((permissionId) => ({
+            adminId: target.id,
+            permissionId,
+          })),
+          skipDuplicates: true,
+        });
+      }
+    });
+
+    this.logger.log(
+      `[changeAccessTier] ${target.id} moved to ${dto.accessTier}` +
+        (replacement ? ` with ${replacement.permissionIds.length} permission rows` : ''),
+    );
+  }
+
+  /**
+   * Work out the exact permission rows a demoted admin should land on.
+   *
+   * Accepts either a named template or an explicit list, and insists on one of
+   * them: "demote" with nothing said is the silent-lockout bug this replaces.
+   * An empty list is allowed, because a school may genuinely want to park an
+   * account — but it has to ask for that in so many words.
+   */
+  private async resolveReplacementAccess(
+    schoolId: string,
+    dto: { permissions?: Array<{ resource: PermissionResource; type: PermissionType }>; roleTemplateId?: string },
+  ): Promise<{ permissionIds: string[]; roleTemplateId: string | null; customised: boolean }> {
+    if (dto.roleTemplateId) {
+      return {
+        permissionIds: await this.roleTemplates.permissionIdsForTemplate(
+          schoolId,
+          dto.roleTemplateId,
+        ),
+        roleTemplateId: dto.roleTemplateId,
+        customised: false,
+      };
+    }
+
+    if (!Array.isArray(dto.permissions)) {
+      throw new BadRequestException(
+        'Removing principal-level access needs the access this person should keep. ' +
+          'Send a role template or an explicit permission list.',
+      );
+    }
+
+    return {
+      permissionIds: await this.permissionIdsFor(dto.permissions),
+      roleTemplateId: null,
+      customised: false,
+    };
+  }
+
+  /** Resolve resource/type pairs to catalog ids, bootstrapping the catalog if empty. */
+  private async permissionIdsFor(
+    permissions: Array<{ resource: PermissionResource; type: PermissionType }>,
+  ): Promise<string[]> {
+    if (permissions.length === 0) return [];
+
+    const conditions = permissions.map((p) => ({
+      resource: p.resource as PermissionResource,
+      type: p.type as PermissionType,
+    }));
+
+    let rows = await this.prisma.permission.findMany({ where: { OR: conditions } });
+    if (rows.length === 0) {
+      await this.initializePermissions();
+      rows = await this.prisma.permission.findMany({ where: { OR: conditions } });
+    }
+    return rows.map((row) => row.id);
+  }
+
+  /**
+   * Make an admin the principal (switches current principal to admin)
+   *
+   * The incumbent's demotion goes through changeAccessTier, so they land on a
+   * named replacement set instead of the zero rows the old title swap left.
+   */
+  async makePrincipal(
+    schoolId: string,
+    adminId: string,
+    dto: MakePrincipalDto,
+    requestingUser: UserWithContext,
+  ): Promise<void> {
     // Validate school exists
     const school = await this.schoolRepository.findById(schoolId);
     if (!school) {
@@ -420,9 +638,10 @@ export class AdminService {
     // Role check: Only school owner can promote someone to principal
     const requestingAdmin = await this.prisma.schoolAdmin.findFirst({
       where: { userId: requestingUser.id, schoolId: school.id },
+      select: { id: true, role: true, accessTier: true },
     });
 
-    if (!requestingAdmin || (requestingAdmin.role || '').toLowerCase().trim() !== 'school_owner') {
+    if (!isSchoolOwnerRole(requestingAdmin?.role)) {
       throw new ForbiddenException('Only the school owner can promote an administrator to principal');
     }
 
@@ -432,36 +651,65 @@ export class AdminService {
       throw new BadRequestException('Administrator not found in this school');
     }
 
-    // Check if already a principal role - use centralized function
-    const isAlreadyPrincipal = isPrincipalRole(adminToPromote.role);
-
-    if (isAlreadyPrincipal) {
+    if (hasPrincipalAccess(adminToPromote)) {
       throw new BadRequestException('This administrator already has a principal-level role');
     }
 
+    // The sitting Principal, if there is one. The owner is excluded: promoting a
+    // deputy must never unseat the person who owns the school — the old code
+    // demoted every principal-level admin, owner included.
+    const incumbents = await this.prisma.schoolAdmin.findMany({
+      where: {
+        schoolId: school.id,
+        accessTier: AdminAccessTier.PRINCIPAL,
+        id: { not: adminId },
+      },
+      select: { id: true, role: true },
+    });
+    const toDemote = incumbents.filter((admin) => !isSchoolOwnerRole(admin.role));
+
+    if (toDemote.length > 0 && !dto?.incumbentRoleTemplateId && !Array.isArray(dto?.incumbentPermissions)) {
+      throw new BadRequestException(
+        'This school already has a principal. Say what access they should keep ' +
+          'once they step down, or they will be left with an empty dashboard.',
+      );
+    }
+
+    const replacement =
+      toDemote.length > 0
+        ? await this.resolveReplacementAccess(school.id, {
+            permissions: dto?.incumbentPermissions,
+            roleTemplateId: dto?.incumbentRoleTemplateId,
+          })
+        : null;
+
     await this.prisma.$transaction(async (tx) => {
-      // Find and demote current principal roles (any principal-level role)
-      const currentPrincipals = await tx.schoolAdmin.findMany({
-        where: {
-          schoolId: school.id,
-        },
-      });
-
-      // Filter to find principal roles using centralized function
-      const principalAdmins = currentPrincipals.filter(admin => isPrincipalRole(admin.role));
-
-      // Demote all principal roles to Administrator
-      for (const principalAdmin of principalAdmins) {
+      for (const outgoing of toDemote) {
         await tx.schoolAdmin.update({
-          where: { id: principalAdmin.id },
-          data: { role: 'administrator' },
+          where: { id: outgoing.id },
+          data: {
+            accessTier: AdminAccessTier.STAFF,
+            role: 'administrator',
+            roleTemplateId: replacement!.roleTemplateId,
+            templateCustomised: replacement!.customised,
+          },
         });
+        await tx.staffPermission.deleteMany({ where: { adminId: outgoing.id } });
+        if (replacement!.permissionIds.length > 0) {
+          await tx.staffPermission.createMany({
+            data: replacement!.permissionIds.map((permissionId) => ({
+              adminId: outgoing.id,
+              permissionId,
+            })),
+            skipDuplicates: true,
+          });
+        }
       }
 
-      // Promote selected admin to principal
+      // Promote selected admin: the tier is what grants access, the title follows.
       await tx.schoolAdmin.update({
         where: { id: adminId },
-        data: { role: 'principal' },
+        data: { accessTier: AdminAccessTier.PRINCIPAL, role: 'principal' },
       });
     });
   }
@@ -488,7 +736,7 @@ export class AdminService {
       },
     });
 
-    if (!principal || !isPrincipalRole(principal.role)) {
+    if (!principal || !hasPrincipalAccess(principal)) {
       throw new BadRequestException('Principal not found in this school');
     }
 
@@ -521,7 +769,7 @@ export class AdminService {
       include: { user: true },
     });
 
-    if (!principal || !isPrincipalRole(principal.role)) {
+    if (!principal || !hasPrincipalAccess(principal)) {
       throw new BadRequestException('Principal not found in this school');
     }
 
@@ -537,7 +785,7 @@ export class AdminService {
     // Check for other admins
     const otherAdmins = await this.staffRepository.findAdminsBySchool(school.id);
     const nonPrincipalAdmins = otherAdmins.filter(
-      (a) => a.id !== principalId && !isPrincipalRole(a.role)
+      (a) => a.id !== principalId && !hasPrincipalAccess(a)
     );
 
     if (nonPrincipalAdmins.length === 0) {
@@ -587,30 +835,36 @@ export class AdminService {
     }
 
     const sanitizedRole = role?.trim() || '';
-    const isPrincipal = isPrincipalRole(sanitizedRole);
 
-    if (isPrincipal) {
-      // Role check: Only school owner can assign principal role during conversion
+    // Conversion never promotes. It mints a STAFF-tier admin even under a
+    // principal-sounding title; use make-principal to grant the tier deliberately.
+    const usesPrincipalTitle = isPrincipalRole(sanitizedRole);
+
+    if (usesPrincipalTitle) {
       const requestingAdmin = await this.prisma.schoolAdmin.findFirst({
         where: { userId: requestingUser.id, schoolId: school.id },
       });
 
-      if (!requestingAdmin || !isPrincipalRole(requestingAdmin.role)) {
-        throw new ForbiddenException('Only principal-level administrators can assign a principal-level role');
+      if (!requestingAdmin && requestingUser.role !== 'SUPER_ADMIN') {
+        throw new ForbiddenException('You do not have an admin profile in this school');
       }
 
-      await this.staffValidator.validatePrincipalRole(school.id, role);
+      this.staffValidator.assertCanAssignPrincipalTitle(
+        requestingAdmin?.role,
+        sanitizedRole,
+        requestingUser.role,
+      );
+
+      await this.staffValidator.validateUniqueCanonicalTitle(school.id, sanitizedRole);
     }
 
-    await this.prisma.$transaction(async (tx) => {
-      // Generate admin ID and public ID
-      const adminId = isPrincipal
+    const createdAdmin = await this.prisma.$transaction(async (tx) => {
+      const adminId = usesPrincipalTitle
         ? await this.idGenerator.generatePrincipalId()
         : await this.idGenerator.generateAdminId();
       const publicId = await this.idGenerator.generatePublicId(school.name, 'admin');
 
-      // Create SchoolAdmin record
-      await tx.schoolAdmin.create({
+      const newAdmin = await tx.schoolAdmin.create({
         data: {
           adminId,
           publicId,
@@ -620,23 +874,36 @@ export class AdminService {
           lastName: teacher.lastName,
           email: teacher.email,
           phone: teacher.phone,
-          role: role.trim(),
+          role: this.normalizeRoleName(sanitizedRole),
+          accessTier: AdminAccessTier.STAFF,
         },
       });
 
-      // Update User role to SCHOOL_ADMIN
       await tx.user.update({
         where: { id: teacher.userId },
         data: { role: 'SCHOOL_ADMIN' },
       });
 
-      // Optionally delete teacher record if not keeping as teacher
       if (!keepAsTeacher) {
         await tx.teacher.delete({
           where: { id: teacherId },
         });
       }
+
+      return newAdmin;
     });
+
+    // Unlike the Add Admin form, this path has no access step to fill in — it is
+    // a super-admin provisioning action on an existing teacher. Read-everything
+    // is the safe landing here, because zero rows would be a locked-out account.
+    try {
+      await this.assignDefaultReadPermissions(createdAdmin.id);
+    } catch (error) {
+      this.logger.error(
+        'Failed to assign default permissions on teacher conversion:',
+        error instanceof Error ? error.stack : error
+      );
+    }
   }
 
   /**
@@ -768,89 +1035,6 @@ export class AdminService {
     );
   }
 
-  /**
-   * Assign custom permissions to a new admin
-   */
-  private async assignCustomPermissions(
-    adminId: string,
-    permissions: Array<{ resource: PermissionResource; type: PermissionType }>
-  ): Promise<void> {
-    this.logger.log(
-      `[assignCustomPermissions] Starting for admin ${adminId} with ${permissions.length} permissions`
-    );
-
-    if (permissions.length === 0) {
-      this.logger.warn(
-        '[assignCustomPermissions] Empty permissions array, falling back to defaults'
-      );
-      await this.assignDefaultReadPermissions(adminId);
-      return;
-    }
-
-    // Build query conditions for all requested permissions
-    const permissionConditions = permissions.map((p) => ({
-      resource: p.resource as PermissionResource,
-      type: p.type as PermissionType,
-    }));
-
-    this.logger.log(
-      `[assignCustomPermissions] Looking for ${permissionConditions.length} permissions`
-    );
-
-    // Fetch matching permissions from the database
-    const dbPermissions = await this.prisma.permission.findMany({
-      where: {
-        OR: permissionConditions,
-      },
-    });
-
-    this.logger.log(
-      `[assignCustomPermissions] Found ${dbPermissions.length} matching permissions in database`
-    );
-
-    if (dbPermissions.length === 0) {
-      this.logger.warn(
-        '[assignCustomPermissions] No matching permissions found! Initializing and retrying...'
-      );
-      await this.initializePermissions();
-
-      // Retry
-      const retryPermissions = await this.prisma.permission.findMany({
-        where: { OR: permissionConditions },
-      });
-
-      if (retryPermissions.length === 0) {
-        this.logger.error('[assignCustomPermissions] Still no permissions after initialization!');
-        return;
-      }
-
-      const result = await this.prisma.staffPermission.createMany({
-        data: retryPermissions.map((perm) => ({
-          adminId: adminId,
-          permissionId: perm.id,
-        })),
-        skipDuplicates: true,
-      });
-
-      this.logger.log(
-        `[assignCustomPermissions] Created ${result.count} permission assignments (after init)`
-      );
-      return;
-    }
-
-    // Create permission assignments
-    const result = await this.prisma.staffPermission.createMany({
-      data: dbPermissions.map((perm) => ({
-        adminId: adminId,
-        permissionId: perm.id,
-      })),
-      skipDuplicates: true,
-    });
-
-    this.logger.log(
-      `[assignCustomPermissions] Created ${result.count} permission assignments for admin ${adminId}`
-    );
-  }
 
   /**
    * Initialize permissions in the database
@@ -897,11 +1081,7 @@ export class AdminService {
 
     // If it's already a principal role (case-insensitive), return the canonical form
     if (isPrincipalRole(normalized)) {
-      // Find the matching canonical form from PRINCIPAL_ROLES
-      const lowerNormalized = normalized.toLowerCase();
-      const principalRoles = ['principal', 'school_principal', 'head_teacher', 'headmaster', 'headmistress', 'school_owner'];
-      const match = principalRoles.find(r => r.toLowerCase() === lowerNormalized);
-      return match || normalized.toLowerCase();
+      return canonicalizeUniqueTitle(normalized);
     }
 
     // For non-principal roles, replace spaces with underscores and lowercase

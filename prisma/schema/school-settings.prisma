@@ -107,19 +107,32 @@ model GradingPolicy {
   school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
 }
 
+/// A named, reusable access bundle — "what a Bursar here can see".
+///
+/// Schools kept rebuilding the same tick-boxes for every hire and drifting apart
+/// while doing it. Holding the set by name makes it re-appliable and correctable
+/// in one place, and lets a profile say "Bursar (customised)" instead of listing
+/// eleven rows.
 model RoleTemplate {
   id            String   @id @default(cuid())
-  schoolId      String
+  /// Null for the platform built-ins every school starts with.
+  schoolId      String?
   name          String
+  /// Stable handle for built-ins (e.g. `bursar`), so seeding stays idempotent.
+  slug          String?
   description   String?
+  /// Job title to prefill when this template is chosen. Still only a label.
+  suggestedRole String?
   permissionIds String[]
   isSystem      Boolean  @default(false)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  school  School?       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  holders SchoolAdmin[]
 
   @@unique([schoolId, name])
+  @@unique([schoolId, slug])
   @@index([schoolId])
 }
 

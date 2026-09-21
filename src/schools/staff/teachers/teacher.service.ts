@@ -17,7 +17,7 @@ import { UpdateTeacherDto } from '../../dto/update-teacher.dto';
 import { CloudinaryService } from '../../../storage/cloudinary/cloudinary.service';
 import { ClassService } from '../../classes/class.service';
 import { SubscriptionsService } from '../../../subscriptions/subscriptions.service';
-import { isPrincipalRole } from '../../dto/permission.dto';
+import { hasPrincipalAccess, isSchoolOwnerRole } from '../../dto/permission.dto';
 import { UserWithContext } from '../../../auth/types/user-with-context.type';
 import { generateSecurePasswordHash } from '../../../common/utils/password.utils';
 import { NotificationService } from '../../../notification/notification.service';
@@ -389,9 +389,8 @@ export class TeacherService {
       throw new ForbiddenException('You do not have an admin profile in this school');
     }
 
-    const requestingRole = (requestingAdmin.role || '').toLowerCase().trim();
-    const isRequestingSchoolOwner = requestingRole === 'school_owner';
-    const isRequestingPrincipalLevel = isPrincipalRole(requestingAdmin.role);
+    const isRequestingSchoolOwner = isSchoolOwnerRole(requestingAdmin.role);
+    const isRequestingPrincipalLevel = hasPrincipalAccess(requestingAdmin);
 
     // Only school_owner and principal-level roles can delete teachers
     if (!isRequestingSchoolOwner && !isRequestingPrincipalLevel) {

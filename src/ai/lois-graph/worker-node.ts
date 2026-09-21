@@ -14,6 +14,8 @@ import type { LoisThreadMemory } from '../lois-thread-memory';
 import { formatThreadMemoryBlock } from '../lois-thread-memory';
 
 const MAX_TURNS = 14;
+/** How many repeats of an identical lookup before the tools are taken away. */
+const MAX_REPEATED_TOOL_CALLS = 2;
 
 export type WorkerLoopResult = {
   assistantText: string;
@@ -59,11 +61,19 @@ export async function runLoisWorkerLoop(params: {
     focusAsk,
   } = params;
 
-  const toolDefs = toolNames
-    ? toolsForNames(toolNames)
+  const requestedNames = toolNames
+    ? [...toolNames]
     : worker === 'student'
-      ? toolsForNames(STUDENT_TOOL_NAMES)
-      : toolsForWorkers([worker]);
+      ? [...STUDENT_TOOL_NAMES]
+      : toolsForWorkers([worker]).map((t) => t.function.name);
+
+  const allowedNames = await agentTools.filterLoisToolNames(requestedNames, {
+    schoolId,
+    userRole,
+    userId,
+    conversationId,
+  });
+  const toolDefs = toolsForNames(allowedNames);
   const attachedToolNames = toolDefs.map((t) => t.function.name);
   const otherDeskDrafted = (() => {
     let lastUser = -1;
@@ -127,6 +137,11 @@ export async function runLoisWorkerLoop(params: {
   let planKind: 'TIMETABLE' | 'SCHEME' | null = null;
   let appliedPending = false;
   let turn = 0;
+  // Guards against a model that keeps re-running the same lookup instead of
+  // answering, which otherwise burns every turn and never replies.
+  const toolResultsBySignature = new Map<string, Record<string, unknown>>();
+  let repeatedToolCalls = 0;
+  let toolsExhausted = false;
 
   while (turn < MAX_TURNS) {
     if (sink.abortSignal?.aborted) break;
@@ -136,8 +151,12 @@ export async function runLoisWorkerLoop(params: {
       {
         model,
         messages: currentMessages,
-        tools: toolDefs as OpenAI.Chat.Completions.ChatCompletionTool[],
-        tool_choice: 'auto',
+        ...(toolsExhausted
+          ? {}
+          : {
+              tools: toolDefs as OpenAI.Chat.Completions.ChatCompletionTool[],
+              tool_choice: 'auto' as const,
+            }),
         temperature: worker === 'pedagogy' || worker === 'student' ? 0.7 : 0.2,
         stream: true,
         stream_options: { include_usage: true },
@@ -230,6 +249,26 @@ export async function runLoisWorkerLoop(params: {
       } catch {
         args = {};
       }
+
+      // Models sometimes re-ask the same question until the turn budget runs
+      // out. Hand back the answer we already have and tell it to speak.
+      const signature = `${tc.name}:${JSON.stringify(args)}`;
+      const seen = toolResultsBySignature.get(signature);
+      if (seen !== undefined) {
+        repeatedToolCalls += 1;
+        currentMessages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: truncateToolPayload(
+            JSON.stringify({
+              ...(seen as Record<string, unknown>),
+              note: 'You already ran this exact lookup. Answer the user with what you have — do not call it again.',
+            }),
+          ),
+        });
+        continue;
+      }
+
       const wrapped = await executeWrappedTool(
         tc.name,
         args,
@@ -251,11 +290,20 @@ export async function runLoisWorkerLoop(params: {
           planKind = null;
         }
       }
+      toolResultsBySignature.set(
+        signature,
+        (wrapped.modelData ?? {}) as Record<string, unknown>,
+      );
       currentMessages.push({
         role: 'tool',
         tool_call_id: tc.id,
         content: truncateToolPayload(JSON.stringify(wrapped.modelData)),
       });
+    }
+
+    // It is going in circles. Take the tools away so the next pass must speak.
+    if (repeatedToolCalls >= MAX_REPEATED_TOOL_CALLS) {
+      toolsExhausted = true;
     }
 
     if (finishReason === 'stop' && toolCalls.length === 0) break;

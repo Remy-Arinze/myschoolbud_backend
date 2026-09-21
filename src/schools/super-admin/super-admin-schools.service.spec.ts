@@ -71,6 +71,8 @@ describe('SuperAdminSchoolsService', () => {
           provide: StaffValidatorService,
           useValue: {
             validatePrincipalRole: jest.fn(),
+            validateUniqueCanonicalTitle: jest.fn(),
+            assertCanAssignPrincipalTitle: jest.fn(),
             validateStaffData: jest.fn(),
           },
         },

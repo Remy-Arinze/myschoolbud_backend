@@ -1,13 +1,14 @@
 /**
- * Mint Playwright storageState for Beulah High School owner (Arinze).
- * Skips OTP. Writes: frontend/e2e/.auth/beulah-admin.json
+ * Mint Playwright storageState for Beulah bursar / empty / VP (same school as owner).
+ * Skips OTP. Writes frontend/e2e/.auth/beulah-{bursar,empty,vp}.json
  *
- * Run from backend: npx tsx scripts/mint-beulah-admin-auth.ts
+ * Run from backend: npx tsx scripts/mint-beulah-access-auth.ts
  */
 import * as fs from 'fs';
 import * as path from 'path';
 import * as jwt from 'jsonwebtoken';
 import { PrismaClient } from '@prisma/client';
+import { BEULAH_ACCESS_PROFILES, BEULAH_SCHOOL_ID } from './beulah-access-admins';
 
 const envPath = path.join(__dirname, '..', '.env');
 if (fs.existsSync(envPath)) {
@@ -22,8 +23,7 @@ if (fs.existsSync(envPath)) {
 const prisma = new PrismaClient({ datasources: { db: { url: process.env.DB_URL } } });
 const FRONTEND_ORIGIN = process.env.E2E_BASE_URL || 'http://localhost:3000';
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this-in-production';
-const AUTH_FILE = path.resolve(__dirname, '../../frontend/e2e/.auth/beulah-admin.json');
-const ADMIN_EMAIL = process.env.E2E_BEULAH_ADMIN_EMAIL || 'remyarinze+beuadmin@gmail.com';
+const AUTH_DIR = path.resolve(__dirname, '../../frontend/e2e/.auth');
 
 function mintTokens(payload: Record<string, unknown>) {
   const accessToken = jwt.sign(payload, JWT_SECRET, { expiresIn: '8h' });
@@ -31,16 +31,17 @@ function mintTokens(payload: Record<string, unknown>) {
   return { accessToken, refreshToken };
 }
 
-async function main() {
+async function mintOne(email: string, authFileName: string) {
   const admin = await prisma.schoolAdmin.findFirst({
     where: {
-      OR: [{ email: ADMIN_EMAIL }, { user: { email: ADMIN_EMAIL } }],
+      schoolId: BEULAH_SCHOOL_ID,
+      OR: [{ email }, { user: { email } }],
     },
     include: { user: true, school: { select: { id: true, name: true } } },
   });
 
   if (!admin?.user) {
-    throw new Error(`Beulah admin not found: ${ADMIN_EMAIL}`);
+    throw new Error(`Beulah access admin not found: ${email}. Seed first.`);
   }
 
   const pwdChangedAt = admin.user.passwordChangedAt
@@ -108,23 +109,24 @@ async function main() {
     ],
   };
 
-  fs.mkdirSync(path.dirname(AUTH_FILE), { recursive: true });
-  fs.writeFileSync(AUTH_FILE, JSON.stringify(storage, null, 2));
+  const authFile = path.join(AUTH_DIR, authFileName);
+  fs.mkdirSync(AUTH_DIR, { recursive: true });
+  fs.writeFileSync(authFile, JSON.stringify(storage, null, 2));
 
-  console.log(
-    JSON.stringify(
-      {
-        ok: true,
-        email: admin.user.email,
-        name: `${admin.firstName} ${admin.lastName}`,
-        school: admin.school.name,
-        schoolId: admin.schoolId,
-        auth: AUTH_FILE,
-      },
-      null,
-      2,
-    ),
-  );
+  return {
+    email: admin.user.email,
+    role: admin.role,
+    schoolType: admin.schoolType,
+    auth: authFile,
+  };
+}
+
+async function main() {
+  const minted = [];
+  for (const profile of BEULAH_ACCESS_PROFILES) {
+    minted.push(await mintOne(profile.email, profile.authFile));
+  }
+  console.log(JSON.stringify({ ok: true, minted }, null, 2));
 }
 
 main()

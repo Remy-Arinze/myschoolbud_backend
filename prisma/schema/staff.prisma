@@ -44,6 +44,14 @@ model Teacher {
   @@index([schoolId, createdAt])
 }
 
+/// Whether an admin bypasses the permission tables entirely.
+/// Set deliberately — never inferred from the `role` title, because spelling
+/// ("Headteacher" vs "Head Teacher") must not decide authority.
+enum AdminAccessTier {
+  PRINCIPAL
+  STAFF
+}
+
 model SchoolAdmin {
   id           String   @id @default(cuid())
   adminId      String   @unique
@@ -53,7 +61,10 @@ model SchoolAdmin {
   phone        String
   email        String?
   profileImage String? // Cloudinary URL for admin profile image
-  role         String   @default("Administrator") // Store role as string to support custom roles
+  role         String   @default("Administrator") // Display title only. Supports custom roles. NOT an authority signal.
+  accessTier   AdminAccessTier @default(STAFF) // Authority. The only thing that grants a permission bypass.
+  roleTemplateId String? // Access bundle this admin was given, for "reapply" and drift reporting.
+  templateCustomised Boolean @default(false) // Their rows were hand-edited away from the template.
   schoolType   String? // "PRIMARY", "SECONDARY", "TERTIARY" - scopes admin to a specific school type
   billingSuspended Boolean @default(false)
   createdAt    DateTime @default(now())
@@ -65,11 +76,14 @@ model SchoolAdmin {
   school   School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
 
   permissions StaffPermission[]
+  roleTemplate RoleTemplate? @relation(fields: [roleTemplateId], references: [id], onDelete: SetNull)
 
   @@unique([userId, schoolId]) // A user can only be an admin once per school, but can be admin in multiple schools
   @@index([userId])
   @@index([schoolId])
   @@index([role])
+  @@index([accessTier])
+  @@index([roleTemplateId])
   @@index([adminId])
   @@index([publicId])
   @@index([schoolType])
@@ -179,3 +193,7 @@ model StaffPermission {
   @@index([adminId])
   @@index([permissionId])
 }
+
+// RoleTemplate lives in school-settings.prisma — it predates this work and is
+// the same concept ("what a Bursar here can see"), so it was extended rather
+// than duplicated. SchoolAdmin.roleTemplate points at it.

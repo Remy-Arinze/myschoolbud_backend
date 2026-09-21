@@ -20,7 +20,7 @@ import { safeResolvePath } from '../common/utils/path-traversal';
 import { NotificationService } from '../notification/notification.service';
 
 import { ReassignStudentDto } from './dto/reassign-student.dto';
-import { isPrincipalRole } from '../schools/dto/permission.dto';
+import { hasPrincipalAccess } from '../schools/dto/permission.dto';
 import { SchoolSettingsService } from '../school-settings/school-settings.service';
 
 @Injectable()
@@ -2733,7 +2733,7 @@ export class StudentsService {
     schoolId: string,
     studentId: string,
     dto: ReassignStudentDto,
-    adminRole: string,
+    adminProfileId: string | null | undefined,
     adminName: string
   ): Promise<any> {
     // 1. Find student and their current active enrollment
@@ -2753,8 +2753,16 @@ export class StudentsService {
     }
 
     // 2. Validate move sensitivity (Level Change)
+    // Read the tier from the database, not the token: a title on a stale JWT
+    // must not decide whether a cross-level move is allowed.
     const isLevelChange = enrollment.classLevel !== dto.targetClassLevel;
-    const isPrincipal = isPrincipalRole(adminRole);
+    const requestingAdmin = adminProfileId
+      ? await this.prisma.schoolAdmin.findFirst({
+          where: { id: adminProfileId, schoolId },
+          select: { id: true, accessTier: true },
+        })
+      : null;
+    const isPrincipal = hasPrincipalAccess(requestingAdmin);
 
     if (isLevelChange && !isPrincipal) {
       throw new ForbiddenException(

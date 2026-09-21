@@ -31,7 +31,7 @@ import { UserWithContext } from '../../auth/types/user-with-context.type';
 import { CloudinaryService } from '../../storage/cloudinary/cloudinary.service';
 import { EmailService } from '../../email/email.service';
 import { randomBytes } from 'crypto';
-import { isPrincipalRole } from '../dto/permission.dto';
+import { AdminAccessTier, hasPrincipalAccess } from '../dto/permission.dto';
 import { LiveStatusService } from '../../live-status/live-status.service';
 import { Prisma, SessionStatus, TermStatus, SchemeOfWorkStatus } from '@prisma/client';
 import { RedisService } from '../../common/redis/redis.service';
@@ -82,7 +82,11 @@ export class SchoolAdminSchoolsService {
    */
   async getMySchool(
     user: UserWithContext
-  ): Promise<SchoolDto & { currentAdmin?: { id: string; role: string } }> {
+  ): Promise<
+    SchoolDto & {
+      currentAdmin?: { id: string; role: string; accessTier: AdminAccessTier };
+    }
+  > {
     const schoolId = user.currentSchoolId;
     const profileId = user.currentProfileId;
 
@@ -90,25 +94,19 @@ export class SchoolAdminSchoolsService {
       throw new BadRequestException('You are not associated with any school');
     }
 
-    const school = await this.schoolRepository.findById(schoolId);
-
-    if (!school) {
-      throw new BadRequestException('School not found');
-    }
-
-    const [completeSchool, teachersCount, studentsCount] = await Promise.all([
+    const [completeSchool, teachersCount, studentsCount, adminRow] = await Promise.all([
       this.prisma.school.findUnique({
-        where: { id: school.id },
-        include: {
-          admins: {
-            include: { user: true },
-            orderBy: { role: 'asc' },
-          },
-          branding: true,
-        },
+        where: { id: schoolId },
+        include: { branding: true },
       }),
       this.prisma.teacher.count({ where: { schoolId } }),
       this.prisma.enrollment.count({ where: { schoolId, isActive: true } }),
+      profileId
+        ? this.prisma.schoolAdmin.findFirst({
+            where: { id: profileId, schoolId },
+            select: { id: true, role: true, accessTier: true },
+          })
+        : Promise.resolve(null),
     ]);
 
     if (!completeSchool) {
@@ -120,16 +118,13 @@ export class SchoolAdminSchoolsService {
       studentsCount,
     });
 
-    const runtimePolicies = await this.schoolSettingsService.getRuntimePolicies(school.id);
+    const runtimePolicies = await this.schoolSettingsService.getRuntimePolicies(completeSchool.id);
 
-    // Include current admin info for permission checks
-    let currentAdmin: { id: string; role: string } | undefined;
-    if (profileId) {
-      const admin = completeSchool.admins.find((a) => a.id === profileId);
-      if (admin) {
-        currentAdmin = { id: admin.id, role: admin.role };
-      }
-    }
+    // accessTier rides along so the shell never has to guess authority from the
+    // title while the permissions request is still in flight.
+    const currentAdmin = adminRow
+      ? { id: adminRow.id, role: adminRow.role, accessTier: adminRow.accessTier }
+      : undefined;
 
     const portalUrl = this.portals.buildPortalUrl(completeSchool);
     return { ...schoolDto, portalUrl, currentAdmin, runtimePolicies };
@@ -1023,6 +1018,7 @@ export class SchoolAdminSchoolsService {
         email: admin.email,
         phone: admin.phone,
         role: admin.role,
+        accessTier: admin.accessTier,
         subject: null,
         employeeId: null,
         isTemporary: false,
@@ -1074,6 +1070,8 @@ export class SchoolAdminSchoolsService {
           email: teacher.email,
           phone: teacher.phone,
           role: 'Teacher',
+          // Teachers are not admins, so they hold no authority tier at all.
+          accessTier: null,
           subject: displaySubject,
           employeeId: teacher.employeeId,
           isTemporary: teacher.isTemporary,
@@ -1580,8 +1578,8 @@ export class SchoolAdminSchoolsService {
       include: { user: true },
     });
 
-    // Find any principal-level role using centralized function
-    const principal = allAdmins.find(admin => isPrincipalRole(admin.role));
+    // Find any principal-level admin by tier, not by title
+    const principal = allAdmins.find(admin => hasPrincipalAccess(admin));
 
     if (!principal || !principal.user?.email) {
       throw new BadRequestException(

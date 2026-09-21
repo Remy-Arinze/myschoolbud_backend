@@ -29,6 +29,8 @@
     "db:studio": "prisma studio",
     "db:push": "prisma db push",
     "db:seed": "tsx prisma/seed.ts",
+    "e2e:seed-beulah-access": "tsx scripts/seed-beulah-access-admins.ts",
+    "e2e:mint-beulah-access": "tsx scripts/mint-beulah-access-auth.ts",
     "db:seed-agora-subjects": "tsx prisma/seed-agora-subjects.ts",
     "db:check-failed-migration": "tsx scripts/check-failed-migration.ts",
     "db:resolve-failed-migration": "tsx scripts/check-failed-migration.ts --resolve",

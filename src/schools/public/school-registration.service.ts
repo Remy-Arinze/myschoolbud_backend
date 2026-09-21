@@ -6,6 +6,7 @@ import { SchoolValidatorService } from '../shared/school-validator.service';
 import { RegisterSchoolDto, RegisterSchoolResponseDto } from '../dto/register-school.dto';
 import { generateSecurePasswordHash } from '../../common/utils/password.utils';
 import { PortalsService } from '../../portals/portals.service';
+import { AdminAccessTier } from '../dto/permission.dto';
 
 @Injectable()
 export class SchoolRegistrationService {
@@ -131,6 +132,8 @@ export class SchoolRegistrationService {
                         lastName: owner.lastName.trim(),
                         phone: owner.phone.trim(),
                         role: 'school_owner',
+                        // The owner must never be locked out of their own school.
+                        accessTier: AdminAccessTier.PRINCIPAL,
                         schoolId: school.id,
                         userId: user.id,
                     },

@@ -25,6 +25,7 @@ import { TeacherSubjectsService } from './staff/teachers/teacher-subjects.servic
 import { TeacherController } from './staff/teachers/teacher.controller';
 import { TeacherCurrentSchoolService } from './staff/teachers/teacher-current-school.service';
 import { PermissionService } from './staff/permissions/permission.service';
+import { RoleTemplateService } from './staff/permissions/role-template.service';
 import { StaffImportService } from './staff/staff-import.service';
 
 // Classes
@@ -102,6 +103,7 @@ import { SchoolLifecycleModule } from './lifecycle/school-lifecycle.module';
     TeacherSubjectsService,
     TeacherCurrentSchoolService,
     PermissionService,
+    RoleTemplateService,
     StaffImportService,
     ClassService,
     ClassResourceService,

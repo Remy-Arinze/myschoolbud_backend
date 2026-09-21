@@ -1,8 +1,9 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import {
+  AdminAccessTier,
   PermissionResource,
   PermissionType,
-  isPrincipalRole,
+  hasPrincipalAccess,
 } from '../schools/dto/permission.dto';
 import { PrismaService } from '../database/prisma.service';
 import {
@@ -98,12 +99,12 @@ export class AiStaffPermissionCheckerService {
 
     const admin = await this.prisma.schoolAdmin.findFirst({
       where: { userId, schoolId },
-      select: { id: true, role: true },
+      select: { id: true, role: true, accessTier: true },
     });
     if (!admin) {
       throw new ForbiddenException('School admin profile not found for this school.');
     }
-    if (isPrincipalRole(admin.role)) {
+    if (hasPrincipalAccess(admin)) {
       return;
     }
 
@@ -259,6 +260,17 @@ export class AiStaffPermissionCheckerService {
         }
         return;
       case 'apply_pending_plans':
+        if (
+          !(await this.schoolAdminHasAny(id, [
+            { resource: PermissionResource.TIMETABLES, type: PermissionType.WRITE },
+            { resource: PermissionResource.CURRICULUM, type: PermissionType.WRITE },
+            { resource: PermissionResource.SCHEME_OF_WORK, type: PermissionType.WRITE },
+          ]))
+        ) {
+          throw new ForbiddenException(
+            'You need Timetables, Curriculum, or Scheme of Work (write) access to apply a Lois plan.',
+          );
+        }
         return;
       case 'grade_essay':
         if (!(await this.schoolAdminHasPermission(id, PermissionResource.GRADES, PermissionType.READ))) {
@@ -275,7 +287,7 @@ export class AiStaffPermissionCheckerService {
         }
         return;
       default:
-        return;
+        throw new ForbiddenException('This assistant action is not available with your current access.');
     }
   }
 
@@ -297,12 +309,12 @@ export class AiStaffPermissionCheckerService {
 
     const admin = await this.prisma.schoolAdmin.findFirst({
       where: { userId, schoolId },
-      select: { id: true, role: true },
+      select: { id: true, role: true, accessTier: true },
     });
     if (!admin) {
       throw new ForbiddenException('School admin profile not found for this school.');
     }
-    if (isPrincipalRole(admin.role)) return;
+    if (hasPrincipalAccess(admin)) return;
 
     if (kind === 'TIMETABLE') {
       if (!(await this.schoolAdminHasPermission(admin.id, PermissionResource.TIMETABLES, PermissionType.WRITE))) {
@@ -362,10 +374,13 @@ export class AiStaffPermissionCheckerService {
     return false;
   }
 
-  async canSeeInsightType(adminId: string, role: string | null | undefined, type: string): Promise<boolean> {
+  async canSeeInsightType(
+    admin: { id: string; accessTier?: AdminAccessTier | string | null },
+    type: string,
+  ): Promise<boolean> {
     if (!isLoisInsightType(type)) return false;
-    if (isPrincipalRole(role)) return true;
-    return this.schoolAdminHasAny(adminId, INSIGHT_ACCESS[type]);
+    if (hasPrincipalAccess(admin)) return true;
+    return this.schoolAdminHasAny(admin.id, INSIGHT_ACCESS[type]);
   }
 
   /**
@@ -386,10 +401,10 @@ export class AiStaffPermissionCheckerService {
 
     const admin = await this.prisma.schoolAdmin.findFirst({
       where: { userId, schoolId },
-      select: { id: true, role: true },
+      select: { id: true, role: true, accessTier: true },
     });
     if (!admin) return [];
-    if (isPrincipalRole(admin.role)) {
+    if (hasPrincipalAccess(admin)) {
       return [...ALL_LOIS_INSIGHT_TYPES];
     }
 
@@ -406,12 +421,12 @@ export class AiStaffPermissionCheckerService {
   async getAdminUserIdsForInsightType(schoolId: string, type: LoisInsightType): Promise<string[]> {
     const admins = await this.prisma.schoolAdmin.findMany({
       where: { schoolId },
-      select: { id: true, userId: true, role: true },
+      select: { id: true, userId: true, role: true, accessTier: true },
     });
 
     const userIds: string[] = [];
     for (const admin of admins) {
-      if (await this.canSeeInsightType(admin.id, admin.role, type)) {
+      if (await this.canSeeInsightType(admin, type)) {
         userIds.push(admin.userId);
       }
     }
@@ -443,6 +458,61 @@ export class AiStaffPermissionCheckerService {
     return allowed;
   }
 
+  /**
+   * Attach only tools this user may call. Unknown school-admin tools are denied.
+   * Principals still pass every named tool via {@link assertLoisToolAllowed}.
+   */
+  async filterAllowedToolNames(params: {
+    toolNames: readonly string[];
+    userRole?: string;
+    userId?: string;
+    schoolId?: string;
+  }): Promise<string[]> {
+    const allowed: string[] = [];
+    for (const toolName of params.toolNames) {
+      try {
+        await this.assertLoisToolAllowed({
+          toolName,
+          userRole: params.userRole,
+          userId: params.userId,
+          schoolId: params.schoolId,
+        });
+        allowed.push(toolName);
+      } catch {
+        // omit tools this admin cannot use
+      }
+    }
+    return allowed;
+  }
+
+  async getSchoolAdminScope(
+    userId?: string,
+    schoolId?: string,
+  ): Promise<{
+    adminId: string;
+    role: string;
+    accessTier: AdminAccessTier;
+    schoolType: string | null;
+  } | null> {
+    if (!userId || !schoolId) return null;
+    const admin = await this.prisma.schoolAdmin.findFirst({
+      where: { userId, schoolId },
+      select: { id: true, role: true, accessTier: true, schoolType: true },
+    });
+    if (!admin) return null;
+    return {
+      adminId: admin.id,
+      role: admin.role,
+      accessTier: admin.accessTier,
+      schoolType: admin.schoolType,
+    };
+  }
+
+  /**
+   * Callable for any school admin (results are filtered), but must not compile a desk by itself.
+   */
+  private static readonly DESK_COMPILE_IGNORE = new Set(['list_lois_insights']);
+
   private async workerHasAnyPermittedTool(
     toolNames: readonly string[],
     userRole: string,
@@ -450,6 +520,7 @@ export class AiStaffPermissionCheckerService {
     schoolId: string,
   ): Promise<boolean> {
     for (const toolName of toolNames) {
+      if (AiStaffPermissionCheckerService.DESK_COMPILE_IGNORE.has(toolName)) continue;
       try {
         await this.assertLoisToolAllowed({ toolName, userRole, userId, schoolId });
         return true;

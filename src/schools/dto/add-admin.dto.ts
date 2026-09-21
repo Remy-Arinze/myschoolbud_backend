@@ -1,8 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsEmail, IsOptional, IsArray, ValidateNested, MinLength, MaxLength, IsNotEmpty } from 'class-validator';
+import { IsString, IsEmail, IsOptional, IsArray, IsEnum, ValidateNested, MinLength, MaxLength, IsNotEmpty } from 'class-validator';
 import { Type, Transform } from 'class-transformer';
-import { AdminRole } from './create-school.dto';
-import { PermissionResource, PermissionType } from './permission.dto';
+import { AdminAccessTier, PermissionResource, PermissionType } from './permission.dto';
 import {
   sanitizeString,
   sanitizeOptionalString,
@@ -88,7 +87,8 @@ export class AddAdminDto {
 
   @ApiPropertyOptional({
     description:
-      'Custom permissions to assign. If not provided, default READ permissions for all resources will be assigned.',
+      'Exact permissions to assign. Send [] for an admin with no dashboard access. ' +
+      'Either this or roleTemplateId is required — access is never granted by default.',
     type: [AdminPermissionDto],
     example: [
       { resource: 'STUDENTS', type: 'READ' },
@@ -101,6 +101,26 @@ export class AddAdminDto {
   @ValidateNested({ each: true })
   @Type(() => AdminPermissionDto)
   permissions?: AdminPermissionDto[];
+
+  @ApiPropertyOptional({
+    description:
+      'Role template to apply. Alternative to sending `permissions` explicitly. ' +
+      'The admin is recorded as holding this template so drift is visible later.',
+  })
+  @IsOptional()
+  @IsString()
+  roleTemplateId?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Authority tier. Omitted means STAFF. PRINCIPAL bypasses the permission ' +
+      'tables entirely and is School-Owner-only — a principal-sounding job title ' +
+      'grants nothing on its own.',
+    enum: AdminAccessTier,
+  })
+  @IsOptional()
+  @IsEnum(AdminAccessTier)
+  accessTier?: AdminAccessTier;
 
   @ApiPropertyOptional({
     description: 'School type this admin is scoped to (PRIMARY, SECONDARY, TERTIARY). If not provided, admin is school-wide.',

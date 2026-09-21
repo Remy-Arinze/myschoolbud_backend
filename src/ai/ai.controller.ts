@@ -7,7 +7,7 @@ import { SchoolDataAccessGuard } from '../common/guards/school-data-access.guard
 import { PermissionGuard } from '../common/guards/permission.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/permission.decorator';
-import { PermissionResource, PermissionType } from '../schools/dto/permission.dto';
+import { PermissionResource, PermissionType, hasPrincipalAccess } from '../schools/dto/permission.dto';
 import { AiService } from './ai.service';
 import { LoisConfigService } from './lois-config.service';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
@@ -126,7 +126,6 @@ export class AiController {
      */
     @Post('chat/stream')
     @Roles(UserRole.TEACHER, UserRole.SCHOOL_ADMIN, UserRole.STUDENT)
-    @RequirePermission(PermissionResource.OVERVIEW, PermissionType.READ)
     @ApiOperation({ summary: 'Stream AI chat with agentic tool-calling via SSE' })
     async chatStream(
         @Request() req: any,
@@ -258,7 +257,6 @@ export class AiController {
 
     @Post('chat')
     @Roles(UserRole.TEACHER, UserRole.SCHOOL_ADMIN, UserRole.STUDENT)
-    @RequirePermission(PermissionResource.OVERVIEW, PermissionType.READ)
     @ApiOperation({ summary: 'Generic AI assistant chat (legacy, non-streaming)' })
     async chat(
         @Request() req: any,
@@ -273,7 +271,6 @@ export class AiController {
 
     @Get('history')
     @Roles(UserRole.TEACHER, UserRole.SCHOOL_ADMIN, UserRole.STUDENT)
-    @RequirePermission(PermissionResource.OVERVIEW, PermissionType.READ)
     @ApiOperation({ summary: 'Get chat history' })
     async getHistory(@Request() req: any, @Param('schoolId') schoolId: string) {
         await this.assertAiBillingForRequest(req, schoolId);
@@ -282,7 +279,6 @@ export class AiController {
 
     @Get('history/:conversationId')
     @Roles(UserRole.TEACHER, UserRole.SCHOOL_ADMIN, UserRole.STUDENT)
-    @RequirePermission(PermissionResource.OVERVIEW, PermissionType.READ)
     @ApiOperation({ summary: 'Get messages for a conversation' })
     async getConversationMessages(
         @Request() req: any,
@@ -295,7 +291,6 @@ export class AiController {
 
     @Delete('history/:conversationId')
     @Roles(UserRole.TEACHER, UserRole.SCHOOL_ADMIN, UserRole.STUDENT)
-    @RequirePermission(PermissionResource.OVERVIEW, PermissionType.READ)
     @ApiOperation({ summary: 'Delete a conversation' })
     async deleteConversation(
         @Request() req: any,
@@ -312,7 +307,6 @@ export class AiController {
      */
     @Post('plans/:planId/apply')
     @Roles(UserRole.SCHOOL_ADMIN)
-    @RequirePermission(PermissionResource.OVERVIEW, PermissionType.READ)
     @ApiOperation({ summary: 'Apply a Lois pending timetable or scheme plan by id' })
     async applyPendingPlan(
         @Request() req: any,
@@ -346,7 +340,6 @@ export class AiController {
 
     @Post('plans/:planId/cancel')
     @Roles(UserRole.SCHOOL_ADMIN)
-    @RequirePermission(PermissionResource.OVERVIEW, PermissionType.READ)
     @ApiOperation({ summary: 'Cancel a Lois pending plan' })
     async cancelPendingPlan(
         @Request() req: any,
@@ -452,7 +445,6 @@ export class AiController {
     /** School admin: fetch their school's Lois config */
     @Get('lois-config')
     @Roles(UserRole.SCHOOL_ADMIN)
-    @RequirePermission(PermissionResource.OVERVIEW, PermissionType.READ)
     @ApiOperation({ summary: 'Get Lois configuration for this school' })
     async getLoisConfig(@Param('schoolId') schoolId: string) {
         const config = await this.loisConfigService.getForSchool(schoolId);
@@ -472,10 +464,9 @@ export class AiController {
         // Only school owners / principals may edit Lois config
         const admin = await this.prisma.schoolAdmin.findFirst({
             where: { userId: req.user.id, schoolId },
-            select: { role: true },
+            select: { id: true, accessTier: true },
         });
-        const principalRoles = ['school_owner', 'principal', 'head_teacher', 'headmaster', 'headmistress'];
-        if (!admin || !principalRoles.includes(admin.role?.toLowerCase() ?? '')) {
+        if (!hasPrincipalAccess(admin)) {
             throw new ForbiddenException('Only the school principal or owner can modify Lois configuration.');
         }
 
@@ -494,10 +485,9 @@ export class AiController {
     ) {
         const admin = await this.prisma.schoolAdmin.findFirst({
             where: { userId: req.user.id, schoolId },
-            select: { role: true },
+            select: { id: true, accessTier: true },
         });
-        const principalRoles = ['school_owner', 'principal', 'head_teacher', 'headmaster', 'headmistress'];
-        if (!admin || !principalRoles.includes(admin.role?.toLowerCase() ?? '')) {
+        if (!hasPrincipalAccess(admin)) {
             throw new ForbiddenException('Only the school principal or owner can reset Lois configuration.');
         }
         await this.loisConfigService.deleteForSchool(schoolId);

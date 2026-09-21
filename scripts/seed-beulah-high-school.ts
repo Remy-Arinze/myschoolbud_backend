@@ -346,6 +346,7 @@ async function ensureAdmin(schoolId: string) {
         phone: ADMIN_PHONE,
         email: ADMIN_EMAIL,
         role: 'school_owner',
+        accessTier: 'PRINCIPAL',
       },
     });
     console.log(`Created school owner ${ADMIN_EMAIL}`);

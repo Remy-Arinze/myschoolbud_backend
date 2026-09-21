@@ -10,7 +10,7 @@ import { Queue } from 'bullmq';
 import { PrismaService } from '../../database/prisma.service';
 import { EmailService } from '../../email/email.service';
 import { TransfersService } from '../../transfers/transfers.service';
-import { isPrincipalRole } from '../dto/permission.dto';
+import { hasPrincipalAccess } from '../dto/permission.dto';
 import { SchoolMapper } from '../domain/mappers/school.mapper';
 import { SchoolDto } from '../dto/school.dto';
 
@@ -187,8 +187,9 @@ export class SchoolLifecycleService {
   async assertOwnerOrPrincipal(userId: string, schoolId: string): Promise<void> {
     const admin = await this.prisma.schoolAdmin.findFirst({
       where: { userId, schoolId },
+      select: { id: true, accessTier: true },
     });
-    if (!admin || !isPrincipalRole(admin.role)) {
+    if (!admin || !hasPrincipalAccess(admin)) {
       throw new ForbiddenException('Only the school owner or a principal can do this.');
     }
   }

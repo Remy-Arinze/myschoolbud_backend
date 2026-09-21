@@ -176,8 +176,11 @@ export class AuthService {
       targetSchoolId,
     );
     let adminRole: string | null = null;
+    let adminAccessTier: string | null = null;
     if (user.role === 'SCHOOL_ADMIN' && hinted.currentProfileId) {
-      adminRole = (user.schoolAdmins || []).find((a) => a.id === hinted.currentProfileId)?.role || null;
+      const admin = (user.schoolAdmins || []).find((a) => a.id === hinted.currentProfileId);
+      adminRole = admin?.role || null;
+      adminAccessTier = admin?.accessTier || null;
     }
     const tokens = await this.generateTokens(
       user.id,
@@ -202,6 +205,7 @@ export class AuthService {
         schoolId: hinted.currentSchoolId,
         tenantId: hinted.currentSchoolId,
         adminRole,
+        adminAccessTier,
         slug: null,
         portalUrl: null,
       },
@@ -542,6 +546,7 @@ export class AuthService {
       let currentPublicId: string | null = null;
       let currentProfileId: string | null = null;
       let adminRole: string | null = null;
+      let adminAccessTier: string | null = null;
       let adminSchoolType: string | null = null;
 
       if (user.role === 'STUDENT') {
@@ -560,6 +565,7 @@ export class AuthService {
         currentPublicId = adminProfile.publicId;
         currentProfileId = adminProfile.id;
         adminRole = adminProfile.role || null;
+        adminAccessTier = adminProfile.accessTier || null;
         adminSchoolType = adminProfile.schoolType || null;
       } else if (
         user.role === 'TEACHER' &&
@@ -583,6 +589,7 @@ export class AuthService {
       if (user.role === 'SCHOOL_ADMIN' && currentProfileId) {
         const adminProfile = (user.schoolAdmins || []).find((a: any) => a.id === currentProfileId);
         adminRole = adminProfile?.role || null;
+        adminAccessTier = adminProfile?.accessTier || null;
         adminSchoolType = adminProfile?.schoolType || null;
       }
 
@@ -611,6 +618,7 @@ export class AuthService {
           schoolId: currentSchoolId,
           tenantId: currentSchoolId, // JWT-first: tenantId IS the schoolId UUID
           adminRole,
+          adminAccessTier,
           adminSchoolType,
         },
       };
@@ -775,10 +783,12 @@ export class AuthService {
       schoolId,
     );
     let adminRole: string | null = null;
+    let adminAccessTier: string | null = null;
     let adminSchoolType: string | null = null;
     if (user.role === 'SCHOOL_ADMIN' && hinted.currentProfileId) {
       const admin = (user.schoolAdmins || []).find((a: any) => a.id === hinted.currentProfileId);
       adminRole = admin?.role || null;
+      adminAccessTier = admin?.accessTier || null;
       adminSchoolType = admin?.schoolType || null;
     }
     const tokens = await this.generateTokens(
@@ -804,6 +814,7 @@ export class AuthService {
         schoolId: hinted.currentSchoolId,
         tenantId: hinted.currentSchoolId,
         adminRole,
+        adminAccessTier,
         adminSchoolType,
         slug: (await this.portals.ensureSlug(schoolId)),
         portalUrl: await this.portals.getSchoolFrontendUrl(schoolId),

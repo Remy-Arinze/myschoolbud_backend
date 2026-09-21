@@ -112,7 +112,8 @@ export class AuthTokensDto {
     publicId?: string | null;
     schoolId?: string | null; // ✅ Current school context
     tenantId?: string | null; // SchoolId UUID — same as schoolId (JWT-first model)
-    adminRole?: string | null; // ✅ Admin-specific role (e.g., 'principal', 'school_owner', 'headmistress')
+    adminRole?: string | null; // Display title only (e.g., 'principal', 'school_owner'). NOT authority.
+    adminAccessTier?: string | null; // Authority: 'PRINCIPAL' bypasses the permission tables, 'STAFF' does not.
     adminSchoolType?: string | null; // ✅ School type this admin is scoped to (e.g., 'PRIMARY', 'SECONDARY')
     slug?: string | null;
     portalUrl?: string | null;

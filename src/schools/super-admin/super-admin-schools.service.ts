@@ -11,7 +11,7 @@ import { CreateSchoolDto } from '../dto/create-school.dto';
 import { UpdateSchoolDto } from '../dto/update-school.dto';
 import { SchoolDto } from '../dto/school.dto';
 import { generateSecurePasswordHash } from '../../common/utils/password.utils';
-import { isPrincipalRole } from '../dto/permission.dto';
+import { AdminAccessTier, isPrincipalRole, canonicalizeUniqueTitle, isUniqueAdminTitle, uniqueTitleDisplayName } from '../dto/permission.dto';
 import { EmailService } from '../../email/email.service';
 import { PortalsService } from '../../portals/portals.service';
 import { SchoolLifecycleService } from '../lifecycle/school-lifecycle.service';
@@ -149,6 +149,8 @@ export class SuperAdminSchoolsService {
             email: sanitizedOwner.email,
             phone: sanitizedOwner.phone,
             role: 'school_owner',
+            // The owner must never be locked out of their own school.
+            accessTier: AdminAccessTier.PRINCIPAL,
             userId: ownerData.user.id,
             schoolId: newSchool.id,
           },
@@ -164,16 +166,34 @@ export class SuperAdminSchoolsService {
           publicId: ownerPublicId,
         });
 
+        const takenCanonicalTitles = new Set<string>(['school_owner']);
+
         // Create additional admins if provided
         if (sanitizedAdmins && sanitizedAdmins.length > 0) {
           for (let i = 0; i < sanitizedAdmins.length; i++) {
             const admin = sanitizedAdmins[i];
             const adminId = adminIds[i];
 
-            // Validate role - use centralized isPrincipalRole function
+            // Provisioning is the one place a principal title still implies the
+            // tier: a super-admin naming a school's Principal means it. The tier
+            // is then written explicitly, so nothing downstream reads the title.
             const isPrincipal = isPrincipalRole(admin.role);
             if (isPrincipal) {
-              await this.staffValidator.validatePrincipalRole(newSchool.id, admin.role);
+              this.staffValidator.assertCanAssignPrincipalTitle(
+                'school_owner',
+                admin.role,
+                'SUPER_ADMIN',
+              );
+              if (isUniqueAdminTitle(admin.role)) {
+                const canonical = canonicalizeUniqueTitle(admin.role);
+                if (takenCanonicalTitles.has(canonical)) {
+                  throw new ConflictException(
+                    `This school already has a ${uniqueTitleDisplayName(admin.role)}.`,
+                  );
+                }
+                takenCanonicalTitles.add(canonical);
+              }
+              await this.staffValidator.validateUniqueCanonicalTitle(newSchool.id, admin.role);
             }
 
             // Validate staff data
@@ -199,6 +219,7 @@ export class SuperAdminSchoolsService {
                 email: admin.email,
                 phone: admin.phone,
                 role: normalizedRole,
+                accessTier: isPrincipal ? AdminAccessTier.PRINCIPAL : AdminAccessTier.STAFF,
                 userId: adminData.user.id,
                 schoolId: newSchool.id,
               },
@@ -737,11 +758,7 @@ export class SuperAdminSchoolsService {
 
     // If it's already a principal role (case-insensitive), return the canonical form
     if (isPrincipalRole(normalized)) {
-      // Find the matching canonical form from PRINCIPAL_ROLES
-      const lowerNormalized = normalized.toLowerCase();
-      const principalRoles = ['principal', 'school_principal', 'head_teacher', 'headmaster', 'headmistress', 'school_owner'];
-      const match = principalRoles.find(r => r.toLowerCase() === lowerNormalized);
-      return match || normalized.toLowerCase();
+      return canonicalizeUniqueTitle(normalized);
     }
 
     // For non-principal roles, replace spaces with underscores and lowercase

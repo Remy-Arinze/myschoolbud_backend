@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { CurrentActivityDto } from '../../common/dto/current-activity.dto';
+import { AdminAccessTier } from './permission.dto';
 
 export class StaffListItemDto {
   @ApiProperty({ description: 'Staff ID' })
@@ -22,6 +23,15 @@ export class StaffListItemDto {
 
   @ApiProperty({ description: 'Role (for admins) or "Teacher"', nullable: true })
   role: string | null;
+
+  @ApiProperty({
+    description:
+      'Authority tier for admins. PRINCIPAL bypasses the permission tables. ' +
+      'Null for teachers, who are not admins at all.',
+    enum: AdminAccessTier,
+    nullable: true,
+  })
+  accessTier: AdminAccessTier | null;
 
   @ApiProperty({ description: 'Subject (for teachers)', nullable: true })
   subject: string | null;

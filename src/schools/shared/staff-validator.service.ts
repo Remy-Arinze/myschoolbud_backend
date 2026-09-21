@@ -1,6 +1,12 @@
-import { Injectable, ConflictException, BadRequestException } from '@nestjs/common';
+import { Injectable, ConflictException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../../database/prisma.service';
-import { isPrincipalRole } from '../dto/permission.dto';
+import {
+  isPrincipalRole,
+  isSchoolOwnerRole,
+  canonicalizeUniqueTitle,
+  isUniqueAdminTitle,
+  uniqueTitleDisplayName,
+} from '../dto/permission.dto';
 
 /**
  * Service for validating staff-related operations
@@ -120,33 +126,101 @@ export class StaffValidatorService {
   }
 
   /**
-   * Validate that a principal role is not being assigned if one already exists
-   * Uses centralized isPrincipalRole() function to check all principal role types
+   * Unique principal-level seats: one school_owner, one principal
+   * (school_principal is the same seat), and one each of head_teacher /
+   * headmaster / headmistress. VP and other staff titles are unlimited.
    */
-  async validatePrincipalRole(schoolId: string, role: string): Promise<void> {
-    // Only validate if the role is a principal role (using centralized function)
-    if (!isPrincipalRole(role)) {
-      return; // Not a principal role, no validation needed
+  async validateUniqueCanonicalTitle(
+    schoolId: string,
+    role: string,
+    excludeAdminId?: string,
+  ): Promise<void> {
+    if (!isUniqueAdminTitle(role)) {
+      return;
     }
 
-    // Check for existing principal roles (case-insensitive match)
-    // This checks for any role that matches the principal roles array
-    const normalizedRole = role.toLowerCase().trim();
-    const existingPrincipal = await this.prisma.schoolAdmin.findFirst({
-      where: {
-        schoolId,
-        role: {
-          equals: normalizedRole,
-          mode: 'insensitive',
-        },
-      },
+    const canonical = canonicalizeUniqueTitle(role);
+    const admins = await this.prisma.schoolAdmin.findMany({
+      where: { schoolId },
+      select: { id: true, role: true },
     });
 
-    if (existingPrincipal) {
+    const clash = admins.find(
+      (admin) =>
+        admin.id !== excludeAdminId &&
+        canonicalizeUniqueTitle(admin.role) === canonical,
+    );
+
+    if (clash) {
       throw new ConflictException(
-        `School already has a ${role} role. Only one principal-level role is allowed per school.`
+        `This school already has a ${uniqueTitleDisplayName(role)}.`,
       );
     }
+  }
+
+  /**
+   * Who may hand out a permission-bypassing tier: the School Owner, or a
+   * super-admin provisioning a school.
+   *
+   * Separate from {@link assertCanAssignPrincipalTitle} because the tier is now
+   * independent of the title — granting PRINCIPAL under a custom title like
+   * "Proprietor" must be gated just as tightly as the recognised seats.
+   *
+   * The owner seat itself is still identified by title, which is safe: nobody can
+   * type `school_owner` (this class forbids minting it), so the system writes it.
+   */
+  assertCanGrantPrincipalTier(
+    requestingAdminRole: string | null | undefined,
+    requestingUserRole?: string,
+  ): void {
+    if (requestingUserRole === 'SUPER_ADMIN') {
+      return;
+    }
+
+    if (!isSchoolOwnerRole(requestingAdminRole)) {
+      throw new ForbiddenException(
+        'Only the School Owner can grant principal-level access',
+      );
+    }
+  }
+
+  /**
+   * School Owner title cannot be minted. Other principal titles are owner-only,
+   * except when a super-admin is provisioning extra admins on a school.
+   */
+  assertCanAssignPrincipalTitle(
+    requestingAdminRole: string | null | undefined,
+    targetRole: string,
+    requestingUserRole?: string,
+  ): void {
+    if (!isPrincipalRole(targetRole)) {
+      return;
+    }
+
+    if (canonicalizeUniqueTitle(targetRole) === 'school_owner') {
+      throw new ForbiddenException('Nobody else may be given the School Owner title.');
+    }
+
+    if (requestingUserRole === 'SUPER_ADMIN') {
+      return;
+    }
+
+    if (!isSchoolOwnerRole(requestingAdminRole)) {
+      throw new ForbiddenException(
+        'Only the School Owner can assign principal-level titles',
+      );
+    }
+  }
+
+  /**
+   * Validate that a unique principal-level title is not already filled.
+   */
+  async validatePrincipalRole(
+    schoolId: string,
+    role: string,
+    excludeAdminId?: string,
+  ): Promise<void> {
+    await this.validateUniqueCanonicalTitle(schoolId, role, excludeAdminId);
   }
 
   private isValidEmail(email: string): boolean {
