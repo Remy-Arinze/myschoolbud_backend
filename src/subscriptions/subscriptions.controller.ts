@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Param, UseGuards, Request } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Query, UseGuards, Request } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { SubscriptionsService } from './subscriptions.service';
 import {
@@ -83,7 +83,8 @@ export class SubscriptionsController {
    */
   @Get('ai-usage')
   async getAiUsageHistory(
-    @Request() req: { user: UserWithContext }
+    @Request() req: { user: UserWithContext },
+    @Query('period') period?: string,
   ): Promise<{ success: boolean; data: any[] }> {
     await this.subscriptionsService.validatePrincipalAccess(req.user);
     const schoolId = req.user.currentSchoolId;
@@ -92,7 +93,7 @@ export class SubscriptionsController {
       return { success: false, data: [] };
     }
 
-    const logs = await this.subscriptionsService.getAiUsageLogs(schoolId);
+    const logs = await this.subscriptionsService.getAiUsageLogs(schoolId, period);
 
     return {
       success: true,

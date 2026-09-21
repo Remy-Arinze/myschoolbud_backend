@@ -79,6 +79,11 @@ export class SubscriptionSummaryDto {
     maxTeachers: number;
     maxAdmins: number;
   };
+  usage?: {
+    students: number;
+    teachers: number;
+    admins: number;
+  };
   tools: {
     slug: string;
     name: string;

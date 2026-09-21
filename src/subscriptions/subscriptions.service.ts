@@ -15,6 +15,19 @@ import {
 } from './dto/subscription.dto';
 import { applyDevStudentCap } from './subscription-dev.config';
 
+const USAGE_PERIOD_MS = {
+  day: 24 * 60 * 60 * 1000,
+  week: 7 * 24 * 60 * 60 * 1000,
+  month: 30 * 24 * 60 * 60 * 1000,
+} as const;
+
+function usagePeriodStart(period?: string): Date {
+  const window = period && period in USAGE_PERIOD_MS
+    ? USAGE_PERIOD_MS[period as keyof typeof USAGE_PERIOD_MS]
+    : USAGE_PERIOD_MS.week;
+  return new Date(Date.now() - window);
+}
+
 /**
  * Service for managing school subscriptions and tool access
  * Handles subscription tiers, tool access checks, and AI credit management
@@ -270,6 +283,16 @@ export class SubscriptionsService {
       aiCredits: subscription.aiCredits,
     });
 
+    const [studentCount, teacherCount, adminCount] = await Promise.all([
+      this.prisma.student.count({
+        where: {
+          enrollments: { some: { schoolId, isActive: true, billingLocked: false } },
+        },
+      }),
+      this.prisma.teacher.count({ where: { schoolId, billingSuspended: false } }),
+      this.prisma.schoolAdmin.count({ where: { schoolId, billingSuspended: false } }),
+    ]);
+
     return {
       tier: subscription.tier,
       isActive: subscription.isActive,
@@ -281,6 +304,11 @@ export class SubscriptionsService {
         maxStudents: applyDevStudentCap(subscription.tier, subscription.maxStudents),
         maxTeachers: subscription.maxTeachers,
         maxAdmins: subscription.maxAdmins,
+      },
+      usage: {
+        students: studentCount,
+        teachers: teacherCount,
+        admins: adminCount,
       },
       tools: subscription.toolAccess.map((ta) => {
         const baseAccess = ta.status === ToolStatus.ACTIVE || ta.status === ToolStatus.TRIAL;
@@ -673,11 +701,15 @@ export class SubscriptionsService {
   }
 
   /**
-   * Get AI credit usage logs for a school
+   * Get AI credit usage logs for a school, limited to a recent window.
    */
-  async getAiUsageLogs(schoolId: string, limit = 50) {
+  async getAiUsageLogs(schoolId: string, period?: string, limit = 500) {
+    const since = usagePeriodStart(period);
     return this.prisma['aiUsageLog'].findMany({
-      where: { schoolId },
+      where: {
+        schoolId,
+        createdAt: { gte: since },
+      },
       take: limit,
       orderBy: { createdAt: 'desc' },
       include: {
@@ -687,6 +719,7 @@ export class SubscriptionsService {
             firstName: true,
             lastName: true,
             email: true,
+            profileImage: true,
           },
         },
       },
