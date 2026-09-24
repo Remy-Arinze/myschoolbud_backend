@@ -1989,9 +1989,10 @@ export class SessionService {
       const members = await this.notificationInbox.getAllSchoolMemberUserIds(schoolId);
       const type = isNewSession ? 'SESSION_STARTED' : 'TERM_STARTED';
       const title = isNewSession ? 'New session started' : 'New term started';
+      const subtitle = isNewSession ? sessionName : termName;
       const body = isNewSession
-        ? `${sessionName} has started at ${schoolName} (${termName})`
-        : `${termName} of ${sessionName} has started at ${schoolName}`;
+        ? `${sessionName} has started at ${schoolName}. ${termName} is the current term.`
+        : `${termName} of ${sessionName} has started at ${schoolName}.`;
 
       const inputs = [
         ...members.admins.map((userId) => ({
@@ -2000,6 +2001,7 @@ export class SessionService {
           role: 'SCHOOL_ADMIN' as const,
           type,
           title,
+          subtitle,
           body,
           link: '/dashboard/school/settings/session',
         })),
@@ -2009,6 +2011,7 @@ export class SessionService {
           role: 'TEACHER' as const,
           type,
           title,
+          subtitle,
           body,
           link: '/dashboard/teacher/calendar',
         })),
@@ -2018,6 +2021,7 @@ export class SessionService {
           role: 'STUDENT' as const,
           type,
           title,
+          subtitle,
           body,
           link: '/dashboard/student/overview',
         })),
@@ -2040,17 +2044,19 @@ export class SessionService {
         status: TermStatus.ACTIVE,
         endDate: { gte: now, lte: in7 },
       },
-      include: { academicSession: true },
+      include: { academicSession: { include: { school: { select: { name: true } } } } },
     });
 
     for (const term of terms) {
       const schoolId = term.academicSession.schoolId;
+      const schoolName = term.academicSession.school?.name || 'your school';
       const daysLeft = Math.ceil(
         (term.endDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24),
       );
       const members = await this.notificationInbox.getAllSchoolMemberUserIds(schoolId);
       const title = 'Term ending soon';
-      const body = `${term.name} ends in ${daysLeft} day${daysLeft === 1 ? '' : 's'}`;
+      const subtitle = term.name;
+      const body = `${term.name} at ${schoolName} ends in ${daysLeft} day${daysLeft === 1 ? '' : 's'}.`;
       const type = 'TERM_ENDING_SOON';
       try {
         await this.notificationInbox.createAndFanOut([
@@ -2060,6 +2066,7 @@ export class SessionService {
             role: 'SCHOOL_ADMIN',
             type,
             title,
+            subtitle,
             body,
             link: '/dashboard/school/settings/session',
             metadata: { termId: term.id, daysLeft },
@@ -2070,6 +2077,7 @@ export class SessionService {
             role: 'TEACHER',
             type,
             title,
+            subtitle,
             body,
             link: '/dashboard/teacher/calendar',
             metadata: { termId: term.id, daysLeft },
@@ -2080,6 +2088,7 @@ export class SessionService {
             role: 'STUDENT',
             type,
             title,
+            subtitle,
             body,
             link: '/dashboard/student/overview',
             metadata: { termId: term.id, daysLeft },

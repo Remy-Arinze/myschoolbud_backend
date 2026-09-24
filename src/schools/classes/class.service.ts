@@ -315,6 +315,10 @@ export class ClassService {
                   arm.classTeachers?.some(
                     (ct: any) => ct.teacherId === teacher.id && ct.isPrimary
                   ) || false,
+                isFormTeacher:
+                  arm.classTeachers?.some(
+                    (ct: any) => ct.teacherId === teacher.id && ct.isFormTeacher
+                  ) || false,
                 createdAt: arm.createdAt,
               },
               // Include other form teachers if any
@@ -328,6 +332,7 @@ export class ClassService {
                   email: ct.teacher.email,
                   subject: ct.subject || ct.teacher.subject,
                   isPrimary: ct.isPrimary,
+                  isFormTeacher: !!ct.isFormTeacher,
                   createdAt: ct.createdAt,
                 })),
             ],
@@ -474,6 +479,7 @@ export class ClassService {
             email: ct.teacher.email,
             subject: ct.subject || ct.teacher.subject,
             isPrimary: ct.isPrimary,
+            isFormTeacher: !!ct.isFormTeacher,
             createdAt: ct.createdAt,
           })),
           classArmId: arm.id,
@@ -602,6 +608,7 @@ export class ClassService {
           email: ct.teacher.email,
           subject: ct.subject || ct.teacher.subject,
           isPrimary: ct.isPrimary,
+          isFormTeacher: !!ct.isFormTeacher,
           createdAt: ct.createdAt,
         })),
         classArmId: arm.id,
@@ -775,7 +782,7 @@ export class ClassService {
     }
 
     // Validate based on school type
-    await this.validateTeacherAssignment(classData, teacher.id, assignmentData);
+    await this.validateTeacherAssignment(classData, teacher.id, assignmentData, isClassArm);
 
     // Check if assignment already exists
     const existingWhere: any = {
@@ -821,10 +828,13 @@ export class ClassService {
     }
 
     // Create assignment
+    const isSecondaryFormTeacher =
+      classData.type === ClassType.SECONDARY && !!assignmentData.isPrimary;
     const assignmentDataToCreate: any = {
       teacherId: assignmentData.teacherId,
       subject: assignmentData.subject || null,
       isPrimary: assignmentData.isPrimary || false,
+      isFormTeacher: isSecondaryFormTeacher,
     };
 
     if (isClassArm) {
@@ -867,14 +877,33 @@ export class ClassService {
     try {
       const userId = (teacher as any).userId;
       if (userId) {
+        const className = classData.name;
+        const subject = assignmentData.subject || null;
+        const isPrimaryClass = !!assignmentData.isPrimary && !isSecondaryFormTeacher;
+        const title = isSecondaryFormTeacher
+          ? 'Form teacher assigned'
+          : isPrimaryClass
+            ? 'Class teacher assigned'
+            : subject
+              ? 'Subject assigned'
+              : 'Class assigned';
+        const subtitle = subject && !assignmentData.isPrimary ? `${subject}, ${className}` : className;
+        const body = isSecondaryFormTeacher
+          ? `You are now the form teacher of ${className}. You can follow reports and what is happening in that class.`
+          : isPrimaryClass
+            ? `You are now the class teacher of ${className}. You can follow reports and what is happening in that class.`
+            : subject
+              ? `You have been assigned to teach ${subject} in ${className}.`
+              : `You have been assigned to ${className}.`;
         void this.notificationService.notifyUsers([userId], {
           schoolId,
           role: 'TEACHER',
           type: 'CLASS_ASSIGNED',
-          title: 'Class assigned',
-          body: `You have been assigned to ${classData.name}.`,
-          link: '/dashboard/teacher/classes',
-          metadata: { classId, teacherId: teacher.id, subject: assignmentData.subject || null },
+          title,
+          subtitle,
+          body,
+          link: `/dashboard/teacher/classes/${classId}`,
+          metadata: { classId, teacherId: teacher.id, subject },
         });
       }
     } catch {
@@ -998,14 +1027,19 @@ export class ClassService {
     try {
       const userId = assignment.teacher?.user?.id;
       if (userId) {
+        const className = classData.name;
+        const subject = assignment.subject || null;
         void this.notificationService.notifyUsers([userId], {
           schoolId,
           role: 'TEACHER',
           type: 'CLASS_REMOVED',
-          title: 'Class assignment removed',
-          body: `You have been removed from ${classData.name}.`,
+          title: 'Removed from class',
+          subtitle: subject ? `Removed from ${subject}, ${className}` : `Removed from ${className}`,
+          body: subject
+            ? `You no longer teach ${subject} in ${className}.`
+            : `You have been removed from ${className}.`,
           link: '/dashboard/teacher/classes',
-          metadata: { classId, teacherId: assignment.teacher.id, subject: assignment.subject || null },
+          metadata: { classId, teacherId: assignment.teacher.id, subject },
         });
       }
     } catch {
@@ -1124,6 +1158,7 @@ export class ClassService {
           email: ct.teacher.email,
           subject: ct.subject || ct.teacher.subject,
           isPrimary: ct.isPrimary,
+          isFormTeacher: !!ct.isFormTeacher,
           createdAt: ct.createdAt,
         })),
         classArmId: updatedArm.id,
@@ -1460,7 +1495,8 @@ export class ClassService {
   private async validateTeacherAssignment(
     classData: any,
     teacherId: string,
-    assignmentData: AssignTeacherToClassDto
+    assignmentData: AssignTeacherToClassDto,
+    isClassArm = false,
   ): Promise<void> {
     // For primary schools: only one teacher allowed per class, and teacher can only be assigned to one class
     if (classData.type === ClassType.PRIMARY) {
@@ -1517,12 +1553,11 @@ export class ClassService {
     if (classData.type === ClassType.SECONDARY) {
       // If this is a form teacher assignment (isPrimary: true), subject is optional
       if (assignmentData.isPrimary) {
-        // Form teacher - no subject required
-        // Check if there's already a form teacher for this class
+        // Form teacher - no subject required. Arms store the row on classArmId.
         const existingFormTeacher = await this.classTeacherModel.findFirst({
           where: {
-            classId: classData.id,
-            isPrimary: true,
+            ...(isClassArm ? { classArmId: classData.id } : { classId: classData.id }),
+            OR: [{ isPrimary: true }, { isFormTeacher: true }],
           },
         });
 
@@ -1582,6 +1617,7 @@ export class ClassService {
         email: ct.teacher?.email || ct.email,
         subject: ct.subject,
         isPrimary: ct.isPrimary,
+        isFormTeacher: ct.isFormTeacher || false,
         createdAt: ct.createdAt,
       }));
     } else if (classData.teachers && Array.isArray(classData.teachers)) {
@@ -1594,6 +1630,7 @@ export class ClassService {
         email: t.email,
         subject: t.subject,
         isPrimary: t.isPrimary,
+        isFormTeacher: t.isFormTeacher || false,
         createdAt: t.createdAt,
       }));
     }

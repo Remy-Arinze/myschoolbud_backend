@@ -9,6 +9,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { safeResolvePath } from '../../common/utils/path-traversal';
 import { NotificationService } from '../../notification/notification.service';
 import { NotificationInboxService } from '../../notification/notification-inbox.service';
+import { plainFileLabel } from '../../notification/notification-text';
 
 @Injectable()
 export class ClassResourceService {
@@ -127,8 +128,9 @@ export class ClassResourceService {
         schoolId: school.id,
         role: 'STUDENT',
         type: 'RESOURCE_UPLOADED',
-        title: 'New class resource',
-        body: `${file.originalname} was added to your class resources.`,
+        title: 'New resource',
+        subtitle: plainFileLabel(file.originalname),
+        body: `${plainFileLabel(file.originalname)} was added to your class resources.`,
         link: '/dashboard/student/resources',
         metadata: { resourceId: resource.id, classId: targetClassId, classArmId: targetClassArmId },
       });

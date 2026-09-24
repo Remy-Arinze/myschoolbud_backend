@@ -926,28 +926,40 @@ ${overview.progressionNotes || ''}
   private async notifyCurriculumReady(schemeId: string, schoolId?: string, success = true) {
     try {
       let sid = schoolId;
-      let classLevelId: string | undefined;
-      if (!sid) {
-        const scheme = await (this.prisma as any).schemeOfWork.findUnique({
-          where: { id: schemeId },
-          select: { schoolId: true, classLevelId: true },
+      let subjectName = '';
+      let className = '';
+      const scheme = await (this.prisma as any).schemeOfWork.findUnique({
+        where: { id: schemeId },
+        select: {
+          schoolId: true,
+          classLevelId: true,
+          subjectId: true,
+          classLevel: { select: { name: true } },
+        },
+      });
+      sid = sid || scheme?.schoolId;
+      const classLevelId = scheme?.classLevelId;
+      className = scheme?.classLevel?.name || '';
+      if (scheme?.subjectId) {
+        const subject = await (this.prisma as any).subject.findUnique({
+          where: { id: scheme.subjectId },
+          select: { name: true },
         });
-        sid = scheme?.schoolId;
-        classLevelId = scheme?.classLevelId;
-      } else {
-        const scheme = await (this.prisma as any).schemeOfWork.findUnique({
-          where: { id: schemeId },
-          select: { classLevelId: true },
-        });
-        classLevelId = scheme?.classLevelId;
+        subjectName = subject?.name || '';
       }
       if (!sid) return;
+      const where = [subjectName, className].filter(Boolean).join(', ');
       await this.notificationService.notifySchoolAdmins(sid, {
         type: success ? 'CURRICULUM_READY' : 'CURRICULUM_FAILED',
         title: success ? 'Curriculum ready' : 'Curriculum generation failed',
+        subtitle: where || 'Scheme of work',
         body: success
-          ? 'A scheme of work is ready for review'
-          : 'Scheme of work generation failed — please try again',
+          ? where
+            ? `The scheme of work for ${where} is ready to review.`
+            : 'A scheme of work is ready to review.'
+          : where
+            ? `The scheme of work for ${where} did not finish. Try again from the class.`
+            : 'Scheme of work generation did not finish. Try again from the class.',
         link: '/dashboard/school/courses',
         metadata: { schemeId, classLevelId },
       });

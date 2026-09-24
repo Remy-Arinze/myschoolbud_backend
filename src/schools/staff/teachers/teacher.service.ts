@@ -239,8 +239,9 @@ export class TeacherService {
     try {
       void this.notificationService.notifySchoolAdmins(school.id, {
         type: 'STAFF_INVITED',
-        title: 'Teacher invited',
-        body: `${teacherData.firstName} ${teacherData.lastName} was added as a teacher.`,
+        title: 'Teacher added',
+        subtitle: `${teacherData.firstName} ${teacherData.lastName}`,
+        body: `${teacherData.firstName} ${teacherData.lastName} was added as a teacher at the school.`,
         link: '/dashboard/school/staff',
         metadata: { teacherId: result.teacher.id, userId: result.user.id },
       });

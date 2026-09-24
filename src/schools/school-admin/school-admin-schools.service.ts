@@ -1128,6 +1128,40 @@ export class SchoolAdminSchoolsService {
       filteredStaff = filteredStaff.filter((staff) => staff.role === roleFilter);
     }
 
+    // KPI counts ignore the status pill so the cards stay stable while the list filters.
+    const statusCounts = {
+      active: 0,
+      pending: 0,
+      suspended: 0,
+      archived: 0,
+    };
+    for (const member of filteredStaff) {
+      switch (member.accountStatus) {
+        case 'ACTIVE':
+          statusCounts.active += 1;
+          break;
+        case 'SHADOW':
+          statusCounts.pending += 1;
+          break;
+        case 'SUSPENDED':
+          statusCounts.suspended += 1;
+          break;
+        case 'ARCHIVED':
+          statusCounts.archived += 1;
+          break;
+      }
+    }
+
+    const accountStatusFilter = {
+      active: 'ACTIVE',
+      pending: 'SHADOW',
+      suspended: 'SUSPENDED',
+    } as const;
+    const selectedStatus = query.status ? accountStatusFilter[query.status] : undefined;
+    if (selectedStatus) {
+      filteredStaff = filteredStaff.filter((member) => member.accountStatus === selectedStatus);
+    }
+
     // Extract unique roles from all staff (before pagination)
     const availableRolesSet = new Set<string>();
     allAdmins.forEach((admin) => {
@@ -1137,7 +1171,7 @@ export class SchoolAdminSchoolsService {
       availableRolesSet.add('Teacher');
     }
 
-    // Apply pagination
+    // Pagination follows the status pill. statusCounts above does not.
     const totalCount = filteredStaff.length;
     const totalPages = Math.ceil(totalCount / limit);
     const paginatedStaff = filteredStaff.slice(skip, skip + limit);
@@ -1149,6 +1183,7 @@ export class SchoolAdminSchoolsService {
       totalPages,
       hasNext: page < totalPages,
       hasPrev: page > 1,
+      statusCounts,
     };
 
     return {

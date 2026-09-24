@@ -385,7 +385,7 @@ export const AGORA_TOOLS: Array<{
     function: {
       name: 'generate_quiz',
       description:
-        'Generate quick quiz questions. Use this tool for ALL quiz requests to ensure the interactive builder appears.',
+        'Generate a quiz from the published scheme. Call once without scope. If blocked, repeat that message and do not write questions. If the scheme is not published, point them to manual assessment creation and the assessments link on the card — do not paste the path. If it asks which weeks, wait for the teacher, then call again with scope delivered or all.',
       parameters: {
         type: 'object',
         properties: {
@@ -399,8 +399,14 @@ export const AGORA_TOOLS: Array<{
             description: 'Types of questions to include',
           },
           difficulty: { type: 'string', enum: ['easy', 'medium', 'hard'] },
+          className: { type: 'string', description: 'Class arm, e.g. "JSS 2 A". Required.' },
+          scope: {
+            type: 'string',
+            enum: ['delivered', 'all'],
+            description: 'Omit until the teacher chooses. delivered = weeks already taught. all = the whole scheme.',
+          },
         },
-        required: ['topic', 'subject', 'gradeLevel'],
+        required: ['topic', 'subject', 'gradeLevel', 'className'],
       },
     },
   },
@@ -442,13 +448,27 @@ export const AGORA_TOOLS: Array<{
     function: {
       name: 'generate_assessment',
       description:
-        'Generate formal assessment questions. MANDATORY: ALWAYS use this tool if the user wants to create an assessment/exam so they can access the full-screen editor.',
+        'Generate an assignment or exam from the published scheme. Set assessmentType EXAM only for an exam. Call once without scope. If blocked, repeat that message and do not write questions. If the scheme is not published, point them to manual assessment creation and the assessments link on the card — do not paste the path. If it asks which weeks, wait for the teacher, then call again with scope delivered or all. Pass className, such as "JSS 2 A".',
       parameters: {
         type: 'object',
         properties: {
           topic: { type: 'string', description: 'Assessment topic' },
           subject: { type: 'string', description: 'The academic subject' },
           gradeLevel: { type: 'string', description: 'e.g., SS 2' },
+          className: {
+            type: 'string',
+            description: 'Class arm the assessment is for, e.g. "JSS 2 A" or "Primary 1 A". Required.',
+          },
+          assessmentType: {
+            type: 'string',
+            enum: ['ASSIGNMENT', 'EXAM'],
+            description: 'EXAM only when they asked for an exam. Otherwise ASSIGNMENT.',
+          },
+          scope: {
+            type: 'string',
+            enum: ['delivered', 'all'],
+            description: 'Omit until the teacher chooses. delivered = weeks already taught. all = the whole scheme.',
+          },
           questionCount: { type: 'number' },
           questionTypes: {
             type: 'array',
@@ -457,7 +477,7 @@ export const AGORA_TOOLS: Array<{
           },
           difficulty: { type: 'string', enum: ['easy', 'medium', 'hard', 'mixed'] },
         },
-        required: ['topic', 'subject', 'gradeLevel'],
+        required: ['topic', 'subject', 'gradeLevel', 'className'],
       },
     },
   },

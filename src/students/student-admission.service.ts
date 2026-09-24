@@ -373,8 +373,9 @@ export class StudentAdmissionService {
     try {
       void this.notificationService.notifySchoolAdmins(schoolId, {
         type: 'ADMISSION_SUBMITTED',
-        title: 'New admission application',
-        body: `${dto.firstName} ${dto.lastName} submitted an admission application.`,
+        title: 'New application',
+        subtitle: `${dto.firstName} ${dto.lastName}`,
+        body: `${dto.firstName} ${dto.lastName} submitted an admission application. It is waiting for review.`,
         link: '/dashboard/school/applications',
         metadata: { applicationId: application.id },
       });
@@ -458,6 +459,7 @@ export class StudentAdmissionService {
           role: 'STUDENT',
           type: 'APPLICATION_APPROVED',
           title: 'Application approved',
+          subtitle: 'Admission application',
           body: 'Your admission application has been approved.',
           link: '/dashboard/student/overview',
           metadata: { applicationId },
@@ -501,10 +503,11 @@ export class StudentAdmissionService {
           schoolId,
           role: 'STUDENT',
           type: 'APPLICATION_REJECTED',
-          title: 'Application update',
-          body: 'Your admission application was not approved.',
+          title: 'Application not approved',
+          subtitle: 'Admission application',
+          body: 'Your application was not approved.',
           link: '/dashboard/student/overview',
-          metadata: { applicationId, reason },
+          metadata: { applicationId },
         });
       }
     } catch {

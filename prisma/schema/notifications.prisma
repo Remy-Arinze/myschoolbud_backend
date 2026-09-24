@@ -5,6 +5,8 @@ model InAppNotification {
   role      String? // SCHOOL_ADMIN | TEACHER | STUDENT (audience hint)
   type      String
   title     String
+  /// One line under the title. The longer explanation stays in body.
+  subtitle  String?
   body      String
   link      String?
   metadata  Json?

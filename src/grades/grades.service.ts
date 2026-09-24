@@ -1245,7 +1245,8 @@ export class GradesService {
     subject?: string,
     termId?: string,
     gradeType?: string,
-    user?: UserWithContext
+    user?: UserWithContext,
+    classReport = false
   ): Promise<any[]> {
     // Validate school exists
     const school = await this.schoolRepository.findById(schoolId);
@@ -1330,13 +1331,29 @@ export class GradesService {
       where.gradeType = gradeType;
     }
 
-    // If teacher context provided, filter by teacher's subjects
+    // A form teacher reading the class report sees every published grade.
+    // Subject teachers still see only the grades they entered.
+    let classWideReport = false;
     if (user?.currentProfileId) {
       const teacherIdString = user.currentProfileId;
       const teacher = await this.resolveTeacherProfile(teacherIdString);
 
       if (teacher) {
-        where.teacherId = teacher.id;
+        if (classReport) {
+          const formAssignment = await this.prisma.classTeacher.findFirst({
+            where: {
+              teacherId: teacher.id,
+              ...(isClassArm ? { classArmId: classId } : { classId }),
+              OR: [{ isFormTeacher: true }, { isPrimary: true }],
+            },
+          });
+          classWideReport = !!formAssignment;
+        }
+        if (!classWideReport) {
+          where.teacherId = teacher.id;
+        } else {
+          where.isPublished = true;
+        }
       }
     }
 
@@ -1407,6 +1424,13 @@ export class GradesService {
             Math.round((grade.score.toNumber() / grade.maxScore.toNumber()) * 100 * 10) / 10 : 0,
           isPublished: grade.isPublished,
           gradedAt: grade.updatedAt,
+          subject: grade.subject,
+          teacher: grade.teacher
+            ? {
+                firstName: grade.teacher.firstName,
+                lastName: grade.teacher.lastName,
+              }
+            : null,
         })),
       });
     });

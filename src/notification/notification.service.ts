@@ -10,6 +10,8 @@ export interface SubmissionNotificationPayload {
   subjectName: string;
   assessmentId: string;
   submissionId: string;
+  classId?: string;
+  classArmId?: string;
   timestamp: string;
 }
 
@@ -147,6 +149,7 @@ export class NotificationService {
       role?: string | null;
       type: string;
       title: string;
+      subtitle?: string | null;
       body: string;
       link?: string | null;
       metadata?: Record<string, unknown> | null;
@@ -161,6 +164,7 @@ export class NotificationService {
         role: data.role,
         type: data.type,
         title: data.title,
+        subtitle: data.subtitle,
         body: data.body,
         link: data.link,
         metadata: data.metadata,
@@ -173,6 +177,7 @@ export class NotificationService {
     data: {
       type: string;
       title: string;
+      subtitle?: string | null;
       body: string;
       link?: string | null;
       metadata?: Record<string, unknown> | null;
@@ -188,15 +193,19 @@ export class NotificationService {
     try {
       const userId = await this.inbox.getTeacherUserId(payload.teacherId);
       if (!userId) return;
+      const classTarget = payload.classArmId || payload.classId;
       await this.inbox.createAndFanOut({
         userId,
         schoolId: payload.schoolId,
         role: 'TEACHER',
         type: 'ASSESSMENT_SUBMITTED',
         title: 'New submission',
-        body: `${payload.studentName} submitted ${payload.assessmentTitle} (${payload.subjectName})`,
-        link: `/dashboard/teacher/assessments/${payload.assessmentId}`,
-        metadata: { ...payload },
+        subtitle: `${payload.studentName} · ${payload.assessmentTitle}`,
+        body: `${payload.studentName} submitted ${payload.assessmentTitle} in ${payload.subjectName}. It is waiting to be graded.`,
+        link: classTarget
+          ? `/dashboard/teacher/classes/${classTarget}?tab=assessments`
+          : `/dashboard/teacher/assessments/${payload.assessmentId}`,
+        metadata: { assessmentId: payload.assessmentId, submissionId: payload.submissionId },
       });
     } catch (err: any) {
       this.logger.warn(`persistSubmission failed: ${err?.message || err}`);
@@ -217,9 +226,10 @@ export class NotificationService {
           role: 'STUDENT',
           type: 'ASSESSMENT_PUBLISHED',
           title: 'New assessment',
-          body: `${payload.teacherName} published ${payload.assessmentTitle} (${payload.subjectName})`,
+          subtitle: payload.assessmentTitle,
+          body: `${payload.assessmentTitle} in ${payload.subjectName} is ready to take.`,
           link: `/dashboard/student/classes`,
-          metadata: { ...payload },
+          metadata: { assessmentId: payload.assessmentId },
         })),
       );
     } catch (err: any) {
@@ -237,9 +247,10 @@ export class NotificationService {
         role: 'STUDENT',
         type: 'GRADE_PUBLISHED',
         title: 'Grade published',
-        body: `Your grade for ${payload.assessmentTitle} (${payload.subjectName}): ${payload.score}/${payload.maxScore}`,
+        subtitle: payload.assessmentTitle,
+        body: `Your result for ${payload.assessmentTitle} in ${payload.subjectName} is ${payload.score}/${payload.maxScore}.`,
         link: `/dashboard/student/results`,
-        metadata: { ...payload },
+        metadata: { assessmentTitle: payload.assessmentTitle },
       });
     } catch (err: any) {
       this.logger.warn(`persistGradePublished failed: ${err?.message || err}`);
@@ -258,10 +269,17 @@ export class NotificationService {
           schoolId: payload.schoolId,
           role: 'TEACHER',
           type: 'STUDENT_REASSIGNED',
-          title: 'Student reassigned',
-          body: `${payload.studentName} moved${payload.oldClassName ? ` from ${payload.oldClassName}` : ''}${payload.newClassName ? ` to ${payload.newClassName}` : ''} by ${payload.adminName}`,
-          link: `/dashboard/teacher/classes`,
-          metadata: { ...payload },
+          title: 'Student moved',
+          subtitle: payload.newClassName
+            ? `${payload.studentName} · ${payload.newClassName}`
+            : payload.studentName,
+          body: payload.oldClassName && payload.newClassName
+            ? `${payload.studentName} left ${payload.oldClassName} and is now in ${payload.newClassName}.`
+            : `${payload.studentName} was moved${payload.newClassName ? ` to ${payload.newClassName}` : ' to another class'}.`,
+          link: payload.newClassArmId
+            ? `/dashboard/teacher/classes/${payload.newClassArmId}`
+            : `/dashboard/teacher/classes`,
+          metadata: { studentId: payload.studentId },
         })),
       );
 
@@ -274,9 +292,12 @@ export class NotificationService {
           role: 'STUDENT',
           type: 'CLASS_REASSIGNED',
           title: 'Class updated',
-          body: `You were moved${payload.newClassName ? ` to ${payload.newClassName}` : ' to a new class'}`,
+          subtitle: payload.newClassName || 'Your class',
+          body: payload.newClassName
+            ? `You were moved to ${payload.newClassName}.`
+            : 'You were moved to a new class.',
           link: `/dashboard/student/classes`,
-          metadata: { ...payload },
+          metadata: { classArmId: payload.newClassArmId || null },
         });
       }
     } catch (err: any) {
@@ -288,10 +309,11 @@ export class NotificationService {
     try {
       await this.notifySchoolAdmins(payload.schoolId, {
         type: 'ACADEMIC_RISK_DIGEST',
-        title: 'Academic risk digest',
-        body: `${payload.atRiskCount} student(s) below threshold at ${payload.schoolName}`,
+        title: 'Students need attention',
+        subtitle: payload.schoolName,
+        body: 'Open Lois for the briefing. Names and scores stay there.',
         link: `/dashboard/school/students`,
-        metadata: { ...payload },
+        metadata: { atRiskCount: payload.atRiskCount },
       });
     } catch (err: any) {
       this.logger.warn(`persistAcademicRisk failed: ${err?.message || err}`);
@@ -300,14 +322,19 @@ export class NotificationService {
 
   private async persistBilling(payload: SubscriptionBillingReminderPayload) {
     try {
-      const kindLabel =
-        payload.kind === 'GRACE_PERIOD' ? 'Grace period active' : 'Subscription action required';
+      const subtitle = payload.kind === 'GRACE_PERIOD' ? 'Grace period' : 'Renewal due';
+      const renewBy = new Date(payload.graceEndsAt).toLocaleDateString('en-GB', {
+        day: 'numeric',
+        month: 'short',
+        year: 'numeric',
+      });
       await this.notifySchoolAdmins(payload.schoolId, {
         type: 'SUBSCRIPTION_BILLING_REMINDER',
-        title: kindLabel,
-        body: `${payload.schoolName}: renew before ${new Date(payload.graceEndsAt).toLocaleDateString()}`,
+        title: 'Subscription',
+        subtitle,
+        body: `${payload.schoolName} needs a renewal before ${renewBy}.`,
         link: `/dashboard/school/subscription`,
-        metadata: { ...payload },
+        metadata: { kind: payload.kind },
       });
     } catch (err: any) {
       this.logger.warn(`persistBilling failed: ${err?.message || err}`);

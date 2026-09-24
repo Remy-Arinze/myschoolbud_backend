@@ -281,8 +281,9 @@ export class AdminService {
     try {
       void this.notificationService.notifySchoolAdmins(school.id, {
         type: 'STAFF_INVITED',
-        title: 'Administrator invited',
-        body: `${adminData.firstName} ${adminData.lastName} was added as an administrator.`,
+        title: 'Administrator added',
+        subtitle: `${adminData.firstName} ${adminData.lastName}`,
+        body: `${adminData.firstName} ${adminData.lastName} was added as an administrator at the school.`,
         link: '/dashboard/school/staff',
         metadata: { adminId: result.admin.id, userId: result.user.id },
       });

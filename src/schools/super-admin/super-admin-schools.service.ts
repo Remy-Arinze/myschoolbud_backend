@@ -305,6 +305,12 @@ export class SuperAdminSchoolsService {
     totalPages: number;
     hasNext: boolean;
     hasPrev: boolean;
+    statusCounts: {
+      total: number;
+      active: number;
+      inactive: number;
+      unapproved: number;
+    };
   }> {
     const page = pagination?.page || 1;
     const limit = pagination?.limit || 10;
@@ -312,25 +318,44 @@ export class SuperAdminSchoolsService {
     const search = pagination?.search?.trim();
     const filter = pagination?.filter || 'all';
 
-    // Build where clause for search and filter
-    const where: any = {};
-
-    // Search filter
+    // Search applies to both the list and the KPI cards. The status pill
+    // filters the list only, so the cards stay stable while paging or filtering.
+    const searchWhere: any = {};
     if (search) {
-      where.OR = [
+      searchWhere.OR = [
         { name: { contains: search, mode: 'insensitive' } },
         { city: { contains: search, mode: 'insensitive' } },
         { state: { contains: search, mode: 'insensitive' } },
       ];
     }
 
-    // Status filter
+    const where: any = { ...searchWhere };
     if (filter !== 'all') {
       where.isActive = filter === 'active';
     }
 
-    // Get total count for pagination
-    const total = await this.prisma.school.count({ where });
+    const [total, scopeTotal, activeSchools, inactiveSchools, unapprovedSchools] =
+      await Promise.all([
+        this.prisma.school.count({ where }),
+        this.prisma.school.count({ where: searchWhere }),
+        this.prisma.school.count({ where: { ...searchWhere, isActive: true } }),
+        this.prisma.school.count({
+          where: { ...searchWhere, isActive: false, registrationStatus: 'VERIFIED' },
+        }),
+        this.prisma.school.count({
+          where: {
+            ...searchWhere,
+            registrationStatus: { in: ['UNAPPROVED', 'PENDING'] },
+          },
+        }),
+      ]);
+
+    const statusCounts = {
+      total: scopeTotal,
+      active: activeSchools,
+      inactive: inactiveSchools,
+      unapproved: unapprovedSchools,
+    };
 
     // Get paginated schools with bounded nested relations (list view)
     const schools = await this.prisma.school.findMany({
@@ -360,6 +385,7 @@ export class SuperAdminSchoolsService {
         totalPages: Math.ceil(total / limit),
         hasNext: page < Math.ceil(total / limit),
         hasPrev: page > 1,
+        statusCounts,
       };
     }
 
@@ -398,6 +424,7 @@ export class SuperAdminSchoolsService {
       totalPages,
       hasNext: page < totalPages,
       hasPrev: page > 1,
+      statusCounts,
     };
   }
 

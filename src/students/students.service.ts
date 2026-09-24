@@ -43,7 +43,8 @@ export class StudentsService {
     tenantId: string,
     pagination: PaginationDto,
     schoolType?: ClassType | string,
-    search?: string
+    search?: string,
+    status?: 'active' | 'pending' | 'suspended',
   ): Promise<PaginatedResponseDto<StudentWithEnrollmentDto>> {
     const { page = 1, limit = 20 } = pagination;
     const skip = (page - 1) * limit;
@@ -118,6 +119,7 @@ export class StudentsService {
         emptyResponse.totalPages = 0;
         emptyResponse.hasNext = false;
         emptyResponse.hasPrev = false;
+        emptyResponse.statusCounts = { active: 0, pending: 0, suspended: 0, archived: 0 };
         return emptyResponse;
       }
 
@@ -146,9 +148,24 @@ export class StudentsService {
       ];
     }
 
-    const [students, total] = await Promise.all([
+    const statusWhere = (accountStatus: 'ACTIVE' | 'SHADOW' | 'SUSPENDED' | 'ARCHIVED') => ({
+      ...whereClause,
+      user: { accountStatus },
+    });
+
+    const accountStatusFilter = {
+      active: 'ACTIVE',
+      pending: 'SHADOW',
+      suspended: 'SUSPENDED',
+    } as const;
+    const selectedStatus = status ? accountStatusFilter[status] : undefined;
+    const listWhere = selectedStatus
+      ? { ...whereClause, user: { accountStatus: selectedStatus } }
+      : whereClause;
+
+    const [students, total, active, pending, suspended, archived] = await Promise.all([
       this.prisma.student.findMany({
-        where: whereClause,
+        where: listWhere,
         include: {
           user: {
             select: {
@@ -178,8 +195,12 @@ export class StudentsService {
         orderBy: { createdAt: 'desc' },
       }),
       this.prisma.student.count({
-        where: whereClause,
+        where: listWhere,
       }),
+      this.prisma.student.count({ where: statusWhere('ACTIVE') }),
+      this.prisma.student.count({ where: statusWhere('SHADOW') }),
+      this.prisma.student.count({ where: statusWhere('SUSPENDED') }),
+      this.prisma.student.count({ where: statusWhere('ARCHIVED') }),
     ]);
 
     const studentIds = students.map(s => s.id);
@@ -211,6 +232,7 @@ export class StudentsService {
     response.totalPages = Math.ceil(total / limit);
     response.hasNext = page < response.totalPages;
     response.hasPrev = page > 1;
+    response.statusCounts = { active, pending, suspended, archived };
     return response;
   }
 

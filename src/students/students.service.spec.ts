@@ -121,14 +121,29 @@ describe('StudentsService', () => {
       (prisma.classArm.findMany as jest.Mock).mockResolvedValue([]);
       (prisma.classLevel.findMany as jest.Mock).mockResolvedValue([]);
       (prisma.student.findMany as jest.Mock).mockResolvedValue(mockStudents as any);
-      (prisma.student.count as jest.Mock).mockResolvedValue(1);
+      (prisma.student.count as jest.Mock).mockImplementation(
+        (args?: { where?: { user?: { accountStatus?: string } } }) => {
+          const status = args?.where?.user?.accountStatus;
+          if (status === 'ACTIVE') return Promise.resolve(4);
+          if (status === 'SHADOW') return Promise.resolve(2);
+          if (status === 'SUSPENDED') return Promise.resolve(1);
+          if (status === 'ARCHIVED') return Promise.resolve(0);
+          return Promise.resolve(7);
+        },
+      );
 
       const result = await service.findAll(mockTenantId, mockPagination);
 
       expect(result).toHaveProperty('data');
-      expect(result).toHaveProperty('total', 1);
+      expect(result).toHaveProperty('total', 7);
       expect(result).toHaveProperty('page', 1);
       expect(result).toHaveProperty('limit', 20);
+      expect(result.statusCounts).toEqual({
+        active: 4,
+        pending: 2,
+        suspended: 1,
+        archived: 0,
+      });
     });
 
     it('should return empty result when no classes found for school type', async () => {
@@ -140,6 +155,12 @@ describe('StudentsService', () => {
 
       expect(result.data).toHaveLength(0);
       expect(result.total).toBe(0);
+      expect(result.statusCounts).toEqual({
+        active: 0,
+        pending: 0,
+        suspended: 0,
+        archived: 0,
+      });
     });
   });
 

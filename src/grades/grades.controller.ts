@@ -156,6 +156,11 @@ export class GradesController {
     required: false,
     description: 'Filter by grade type (CA, ASSIGNMENT, EXAM)',
   })
+  @ApiQuery({
+    name: 'report',
+    required: false,
+    description: 'When 1, a form teacher of this class receives every published grade',
+  })
   @ApiResponse({
     status: 200,
     description: 'Student grades retrieved successfully',
@@ -166,6 +171,7 @@ export class GradesController {
     @Query('subject') subject?: string,
     @Query('termId') termId?: string,
     @Query('gradeType') gradeType?: string,
+    @Query('report') report?: string,
     @CurrentUser() user?: UserWithContext
   ): Promise<ResponseDto<any[]>> {
     const data = await this.gradesService.getClassGradesGroupedByStudents(
@@ -174,7 +180,8 @@ export class GradesController {
       subject,
       termId,
       gradeType,
-      user
+      user,
+      report === '1'
     );
     return ResponseDto.ok(data, 'Student grades retrieved successfully');
   }

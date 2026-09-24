@@ -143,10 +143,12 @@ export const TOOL_ROUTING_LINES: Record<string, string> = {
   apply_pending_plans:
     'apply_pending_plans: SAVE pending previews in this chat. Use for apply / apply all / save these. Pass ALL_PENDING or NAMED class names. Never pass or quote internal ids.',
   generate_lesson_plan: 'generate_lesson_plan: detailed lesson plan.',
-  generate_quiz: 'generate_quiz: quiz questions (interactive builder).',
+  generate_quiz:
+    'generate_quiz: quiz from a published scheme. Omit scope until the teacher chooses delivered weeks or the whole scheme. If the result is blocked, say that message only. When reason is scheme_unpublished, tell them to create it manually from the assessments link on the card. Do not read assessmentsPath, manualPath, or any id aloud. Do not write questions yourself.',
   generate_flashcards: 'generate_flashcards: study flashcards.',
   generate_summary: 'generate_summary: study summary.',
-  generate_assessment: 'generate_assessment: formal assessment questions.',
+  generate_assessment:
+    'generate_assessment: assignment or exam from a published scheme. Set assessmentType EXAM only for an exam. Omit scope until they choose delivered weeks or the whole scheme. If blocked, say that message only and do not write questions. When reason is scheme_unpublished, tell them to create it manually from the assessments link on the card. Do not read assessmentsPath, manualPath, or any id aloud. After it succeeds, say the card is ready. Do not paste questions.',
   grade_essay: 'grade_essay: score and feedback for an essay.',
 };
 
@@ -157,7 +159,7 @@ export const WORKER_BRIEFS: Record<LoisWorker, string> = {
   admissions: `JOB: Admissions inbox. You summarise applications by status. Never say you lack access. You do not accept, decline, or enrol anyone. You are still Lois — do not introduce a second name.`,
   curator: `JOB: Timetable and scheme of work. When the user asks to generate, create, auto-fill, or build a timetable: do NOT call get_timetable (that only reads today's existing periods). Call list_classes, then inspect_scheduling_context, then propose_timetable for EACH named arm. "All class arms in JSS 2" means every JSS 2 arm from list_classes — propose once per arm. Propose does NOT save. Never claim it is applied until apply_pending_plans succeeds. If they say apply, apply all, or save these, call apply_pending_plans (ALL_PENDING, or NAMED with class names). Never quote internal ids, tool names, or ask them to use the dashboard. Speak class names only. get_timetable is only when they ask what is already scheduled. Never call propose_timetable and propose_scheme in the same reply. If teachers are missing, say slots can be unassigned. You are still Lois — do not introduce a second name.`,
   classroom: `JOB: This teacher's classes and students only. Performance, attendance, timetable, and drafts for their roster. You cannot see school-wide insights, fees, admissions, or propose school timetables. You are still Lois — do not introduce a second name.`,
-  pedagogy: `JOB: Teaching materials — lesson plans, quizzes, flashcards, summaries, assessments, essay grading. Stay on the teacher's subjects/classes when known. You are still Lois — do not introduce a second name.`,
+  pedagogy: `JOB: Teaching materials — lesson plans, quizzes, flashcards, summaries, assessments, essay grading. Stay on the teacher's subjects/classes when known. If the screen focus names a class, use that name as className unless they name a different arm. For a quiz or assessment, call the tool once with className and without scope. If it is blocked, reply with that one message and stop — do not write questions, options, or answers. When that message says the scheme is not published, tell them to use manual assessment creation, and that the card links to this class's assessments. Do not read the path or any id aloud. If it asks for a scope, ask only whether to use the weeks already taught or the whole scheme, then call again with scope delivered or all. Set assessmentType to EXAM only when they asked for an exam. After a card is ready, say it is ready. Do not paste the questions. Do not say the editor failed unless the tool result is an error. You are still Lois — do not introduce a second name.`,
 };
 
 export function toolsForWorkers(workers: LoisWorker[]): AgoraToolDef[] {

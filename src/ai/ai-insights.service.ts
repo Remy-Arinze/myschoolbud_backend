@@ -21,6 +21,25 @@ export { LOIS_INSIGHT_TYPES, type LoisInsightType } from './lois-insight-access'
 
 const MAX_DAILY_NOTIFICATIONS = 8;
 
+function loisNoticeHeadline(type: string): string {
+  switch (type) {
+    case 'ACADEMIC_RISK':
+      return 'Students need attention';
+    case 'STUDENT_DROP':
+      return 'A result changed';
+    case 'SOW_GAP':
+      return 'Scheme coverage';
+    case 'ATTENDANCE_RISK':
+      return 'Attendance needs attention';
+    case 'FEE_ARREARS':
+      return 'Fees need attention';
+    case 'ADMISSIONS_BACKLOG':
+      return 'Applications waiting';
+    default:
+      return 'Lois insight';
+  }
+}
+
 type InsightInput = {
   type: LoisInsightType;
   severity: 'info' | 'warning' | 'critical';
@@ -248,17 +267,18 @@ export class AiInsightsService {
       try {
         const userIds = await this.permissionChecker.getAdminUserIdsForInsightType(schoolId, item.type);
         if (userIds.length === 0) continue;
+        const headline = loisNoticeHeadline(item.type);
         await this.notifications.notifyUsers(userIds, {
           schoolId,
           role: 'SCHOOL_ADMIN',
           type: 'LOIS_INSIGHT',
-          title: item.title,
-          body: item.summary.slice(0, 240),
+          title: headline,
+          subtitle: headline,
+          body: 'Open Lois for the briefing.',
           link: insightDeepLink(item.id),
           metadata: {
             insightId: item.id,
             type: item.type,
-            askPrompt: item.askPrompt,
           },
         });
       } catch (err) {

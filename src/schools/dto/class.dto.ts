@@ -23,6 +23,9 @@ export class ClassTeacherDto {
   @ApiProperty()
   isPrimary: boolean;
 
+  @ApiProperty({ required: false, description: 'Secondary form teacher for this class arm' })
+  isFormTeacher?: boolean;
+
   @ApiProperty()
   createdAt: Date;
 }

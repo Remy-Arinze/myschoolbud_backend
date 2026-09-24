@@ -475,7 +475,7 @@ export class TimetableService {
       orderBy: [{ dayOfWeek: 'asc' }, { startTime: 'asc' }],
     });
 
-    return periods.map((p: any) => this.mapToPeriodDto(p));
+    return this.detectTimeConflicts(periods.map((p: any) => this.mapToPeriodDto(p)));
   }
 
   /**
@@ -682,27 +682,44 @@ export class TimetableService {
           )
         ) {
           conflicts.push(period2.id);
-          if (!period2.hasConflict) {
-            period2.hasConflict = true;
-            period2.conflictingPeriodIds = period2.conflictingPeriodIds || [];
+          const message = `${this.periodClashLabel(period1)} overlaps ${this.periodClashLabel(period2)} at ${period1.startTime} on ${this.formatDayLabel(period1.dayOfWeek)}`;
+          period2.hasConflict = true;
+          period2.conflictingPeriodIds = period2.conflictingPeriodIds || [];
+          if (!period2.conflictingPeriodIds.includes(period1.id)) {
             period2.conflictingPeriodIds.push(period1.id);
           }
-
-          // Build conflict message
-          const period1Name = period1.subjectName || period1.courseName || 'Unknown';
-          const period2Name = period2.subjectName || period2.courseName || 'Unknown';
-          conflictMessage = `Course clash: ${period1Name} conflicts with ${period2Name} at ${period1.startTime} on ${period1.dayOfWeek}`;
+          period2.conflictMessage = period2.conflictMessage
+            ? `${period2.conflictMessage} ${message}`
+            : message;
+          conflictMessage = conflictMessage ? `${conflictMessage} ${message}` : message;
         }
       }
 
       if (conflicts.length > 0) {
         period1.hasConflict = true;
-        period1.conflictingPeriodIds = conflicts;
-        period1.conflictMessage = conflictMessage;
+        period1.conflictingPeriodIds = [
+          ...new Set([...(period1.conflictingPeriodIds || []), ...conflicts]),
+        ];
+        if (conflictMessage && !period1.conflictMessage?.includes(conflictMessage)) {
+          period1.conflictMessage = period1.conflictMessage
+            ? `${period1.conflictMessage} ${conflictMessage}`
+            : conflictMessage;
+        }
       }
     }
 
     return periodsWithConflicts;
+  }
+
+  private periodClashLabel(period: TimetablePeriodDto): string {
+    const subject = period.subjectName || period.courseName || 'Lesson';
+    const cls = period.classArmName || period.className;
+    return cls ? `${subject} in ${cls}` : subject;
+  }
+
+  private formatDayLabel(day: string): string {
+    if (!day) return '';
+    return day.charAt(0).toUpperCase() + day.slice(1).toLowerCase();
   }
 
   /**
@@ -1378,8 +1395,23 @@ export class TimetableService {
         if (uid) teacherUserIds.add(uid);
       }
 
-      const title = 'Timetable updated';
-      const body = 'A lesson was added or changed on the timetable';
+      let className = 'Your class';
+      if (opts.classArmId) {
+        const arm = await this.prisma.classArm.findUnique({
+          where: { id: opts.classArmId },
+          select: { name: true, classLevel: { select: { name: true } } },
+        });
+        if (arm) className = [arm.classLevel?.name, arm.name].filter(Boolean).join(' ');
+      } else if (opts.classId) {
+        const cls = await this.prisma.class.findUnique({
+          where: { id: opts.classId },
+          select: { name: true },
+        });
+        if (cls?.name) className = cls.name;
+      }
+      const title = 'Timetable changed';
+      const subtitle = className;
+      const body = `A lesson was added or changed on the ${className} timetable.`;
       await this.notificationInbox.createAndFanOut([
         ...[...teacherUserIds].map((userId) => ({
           userId,
@@ -1387,6 +1419,7 @@ export class TimetableService {
           role: 'TEACHER',
           type: 'TIMETABLE_UPDATED',
           title,
+          subtitle,
           body,
           link: '/dashboard/teacher/timetables',
         })),
@@ -1396,6 +1429,7 @@ export class TimetableService {
           role: 'STUDENT',
           type: 'TIMETABLE_UPDATED',
           title,
+          subtitle,
           body,
           link: '/dashboard/student/timetables',
         })),

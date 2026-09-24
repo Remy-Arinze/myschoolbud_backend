@@ -377,6 +377,25 @@ Return as JSON:
     }
   }
 
+  /** Keep the stem separate from choices the model pasted into the question text. */
+  private cleanAssessmentQuestion(raw: any) {
+    const options = Array.isArray(raw?.options) ? raw.options.map((o: unknown) => String(o)) : [];
+    const original = String(raw?.text || raw?.question || '').trim();
+    let text = original;
+    if (options.length > 0) {
+      const optionStart = text.search(/\s+(?:[-–—]\s*)?(?:\*\*)?\s*[A-D]\)\s/);
+      if (optionStart > 12) text = text.slice(0, optionStart);
+    }
+    text = text.replace(/\s*(\*\*)?\s*correct answer\s*:.*$/i, '').trim();
+    text = text.replace(/[\s:*–—-]+$/, '').trim();
+    return {
+      ...raw,
+      text: text || original,
+      question: text || original,
+      options,
+    };
+  }
+
   async generateAssessmentQuestions(
     options: GenerateQuestionsOptions,
   ): Promise<{ data: QuizQuestion[]; usage: any }> {
@@ -427,6 +446,8 @@ If a week assessmentType is Project, prefer short_answer/essay over a pile of MC
 
 ${weekBlock}
 
+The question text is the stem only. Put choices only in options. Do not write "A)", "B)", or "Correct Answer" inside text.
+
 Return JSON: {"questions": [{"text": "...", "type": "MULTIPLE_CHOICE | SHORT_ANSWER | ESSAY", "options": ["..."], "correctAnswer": "...", "points": number, "stableKey": "copy from the week this tests"}]}`;
 
     try {
@@ -448,7 +469,15 @@ Return JSON: {"questions": [{"text": "...", "type": "MULTIPLE_CHOICE | SHORT_ANS
       if (!content) throw new Error('No response from AI');
 
       const parsed = JSON.parse(content);
-      return { data: parsed.questions || parsed, usage: response.usage };
+      const questions = Array.isArray(parsed.questions)
+        ? parsed.questions
+        : Array.isArray(parsed)
+          ? parsed
+          : [];
+      return {
+        data: questions.map((q: any) => this.cleanAssessmentQuestion(q)),
+        usage: response.usage,
+      };
     } catch (error) {
       this.logger.error(`Failed to generate assessment questions: ${error}`);
       throw new BadRequestException('Failed to generate questions. Please try again.');

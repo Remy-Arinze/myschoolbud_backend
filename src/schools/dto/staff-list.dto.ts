@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { CurrentActivityDto } from '../../common/dto/current-activity.dto';
+import { AccountStatusCountsDto } from '../../common/dto/pagination.dto';
 import { AdminAccessTier } from './permission.dto';
 
 export class StaffListItemDto {
@@ -89,6 +90,12 @@ export class StaffListMetaDto {
 
   @ApiProperty({ description: 'Has previous page' })
   hasPrev: boolean;
+
+  @ApiProperty({
+    description: 'Status totals for the full filtered staff list, not the current page',
+    type: AccountStatusCountsDto,
+  })
+  statusCounts: AccountStatusCountsDto;
 }
 
 export class StaffListResponseDto {
@@ -120,4 +127,12 @@ export class GetStaffListQueryDto {
     required: false,
   })
   schoolType?: string;
+
+  @ApiProperty({
+    description:
+      'Filter the list by account status. Status KPI counts ignore this and cover the full filtered set.',
+    required: false,
+    enum: ['active', 'pending', 'suspended'],
+  })
+  status?: 'active' | 'pending' | 'suspended';
 }

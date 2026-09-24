@@ -193,8 +193,9 @@ export class TransfersService {
           schoolId,
           role: 'STUDENT',
           type: 'TRANSFER_INITIATED',
-          title: 'Transfer initiated',
-          body: 'Your transfer access code has been generated.',
+          title: 'Transfer started',
+          subtitle: 'A transfer code was sent to your email',
+          body: 'Use the code from your email to complete the transfer. The code is not shown here.',
           link: '/dashboard/student/applications',
           metadata: { transferId: transfer.id, expiresAt: expiresAt.toISOString() },
         });

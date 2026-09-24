@@ -52,7 +52,7 @@ export class SuperAdminSchoolsController {
     description: 'Paginated list of schools',
     type: ResponseDto<PaginatedResponseDto<SchoolDto>>,
   })
-  async findAll(@Query() query: PaginationDto): Promise<ResponseDto<PaginatedResponseDto<SchoolDto>>> {
+  async findAll(@Query() query: PaginationDto) {
     const data = await this.superAdminSchoolsService.findAll(query);
     return ResponseDto.ok(data, 'Schools retrieved successfully');
   }

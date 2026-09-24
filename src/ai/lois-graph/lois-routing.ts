@@ -33,7 +33,7 @@ const ACADEMIC_READ_RE =
 const OPERATIONS_PEOPLE_RE =
   /\b(?:who(?:'s| is| are) in|students in|in [^.?]{0,80}'s class|class (?:list|roster|roll)|list(?: the)? students|who teaches|who(?:'s| is) (?:the )?(?:class )?teacher)\b/i;
 const PEDAGOGY_RE =
-  /\b(?:lesson plans?|flashcards?|practice quiz|grade (?:this |an |the )?essay|(?:generate|make|create|draft|build)\b[\s\w]{0,24}\b(?:quiz|quizzes|flashcards?|summar(?:y|ies)|assessments?|lesson plans?))\b/i;
+  /\b(?:lesson plans?|flashcards?|practice quiz|grade (?:this |an |the )?essay|(?:generate|make|create|draft|build|set|write)\b[\s\w]{0,40}\b(?:quiz|quizzes|flashcards?|summar(?:y|ies)|assessments?|assignments?|lesson plans?))\b/i;
 
 const MAX_ROUTE_HOPS = 8;
 

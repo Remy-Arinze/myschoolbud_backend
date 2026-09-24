@@ -27,7 +27,7 @@ const DESK_JOB: Record<LoisWorker, string> = {
   admissions: 'applications inbox',
   curator: 'GENERATE, auto-fill, or APPLY a timetable or scheme of work',
   classroom: "this teacher's own classes and students",
-  pedagogy: 'lesson plans, quizzes, revision/practice questions, flashcards, summaries, assessments',
+  pedagogy: 'lesson plans, quizzes, assignments, revision/practice questions, flashcards, summaries, assessments',
 };
 
 export const SLIM_SUPERVISOR_SYSTEM = `You only classify the latest user message for Lois. You never greet the user and never call tools.
@@ -35,7 +35,7 @@ Return JSON matching the schema.
 Classify ONLY the latest user message. A prior recipe or write refusal must not make a new school ask off_topic.
 mode=desks: list EVERY specialist desk this message still needs (paraphrase and follow-ups count — "how many people are in debt" → finance; "names of the children in JSS 1 A" → operations; "kids struggling" → academic; "on the board Thursday" → operations read, not curator; "do this also for JSS 2" after a timetable generate → curator).
 mode=rag: handbook/policy questions only (late-coming rules, uploaded documents). Not live grades, rosters, or counts.
-mode=capability: payment / hire staff / send WhatsApp or email / accept or decline admission writes only. Any request to PRODUCE teaching material — questions, MCQs, multiple choice, drills, exercises, tests, revision, flashcards, summaries — is pedagogy, whatever the verb (make, cook, whip up, draft, generate, set). "Don't send, just draft", "do not fire it off", "a note I can copy" is operations, not capability.
+mode=capability: payment / hire staff / send WhatsApp or email / accept or decline admission writes only. Any request to PRODUCE teaching material — questions, MCQs, multiple choice, drills, exercises, tests, quizzes, assignments, revision, flashcards, summaries — is pedagogy, whatever the verb (make, cook, whip up, draft, generate, set). "Don't send, just draft", "do not fire it off", "a note I can copy" is operations, not capability.
 mode=off_topic: recipes, gossip, or non-school chat with NO school question in the same message.
 mode=clarify: only when generate/apply needs a class and none is named in the message or memory. Set question to one short question. If a class or person is already named and they want data, pick a desk — do not clarify.
 schoolPart: when one message mixes non-school chat with a school question, set mode=desks for the school question and copy that clause into schoolPart verbatim ("What's the weather in Enugu, and is Adaeze Okeke still with us?" → desks=[operations], schoolPart="is Adaeze Okeke still with us?"). Leave schoolPart as "" when the whole message is the ask.

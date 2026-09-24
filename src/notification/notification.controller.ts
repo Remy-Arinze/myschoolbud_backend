@@ -362,13 +362,13 @@ export class NotificationController {
      * School admins and teachers share teacherConnections keyed by teacher profile or userId.
      */
     @OnEvent('inbox.created')
-    async handleInboxCreated(payload: { notification: { userId: string; schoolId: string | null; type: string; title: string; body: string; link: string | null; id: string; createdAt: string } }) {
+    async handleInboxCreated(payload: { notification: { userId: string; schoolId: string | null; type: string; title: string; subtitle?: string | null; link: string | null; id: string; createdAt: string } }) {
         const n = payload.notification;
         const eventData = JSON.stringify({
             type: 'INBOX_CREATED',
             notificationId: n.id,
             title: n.title,
-            body: n.body,
+            subtitle: n.subtitle || '',
             link: n.link,
             notificationType: n.type,
             timestamp: n.createdAt,

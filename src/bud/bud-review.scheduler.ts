@@ -37,6 +37,7 @@ export class BudReviewScheduler {
         await this.notifications.notifyUsers([profile.student.userId], {
           type: 'BUD_DAILY_REVIEW',
           title: `${profile.companionName}: ready to review?`,
+          subtitle: 'Ready to review?',
           body: `Hey ${profile.student.firstName}, want to go over what you learnt today?`,
           link: '/dashboard/student/bud/review',
           role: 'STUDENT',

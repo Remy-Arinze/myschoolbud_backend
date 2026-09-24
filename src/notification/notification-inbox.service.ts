@@ -4,6 +4,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { PrismaService } from '../database/prisma.service';
 import { SchoolSettingsService } from '../school-settings/school-settings.service';
 import * as webpush from 'web-push';
+import { safeNoticeField } from './notification-text';
 
 export type NotificationRole = 'SCHOOL_ADMIN' | 'TEACHER' | 'STUDENT' | 'SUPER_ADMIN';
 
@@ -13,6 +14,7 @@ export interface CreateNotificationInput {
   role?: NotificationRole | string | null;
   type: string;
   title: string;
+  subtitle?: string | null;
   body: string;
   link?: string | null;
   metadata?: Record<string, unknown> | null;
@@ -26,6 +28,7 @@ export interface InboxCreatedPayload {
     role: string | null;
     type: string;
     title: string;
+    subtitle: string | null;
     body: string;
     link: string | null;
     metadata: unknown;
@@ -144,6 +147,18 @@ export class NotificationInboxService {
           continue;
         }
 
+        const title = safeNoticeField(input.title, 'School update');
+        const subtitle = input.subtitle
+          ? safeNoticeField(input.subtitle, '')
+          : null;
+        const body = safeNoticeField(
+          input.body,
+          'Open this notification in the app for what changed.',
+        );
+        if (title !== input.title.trim() || body !== input.body.trim() || (input.subtitle && subtitle !== input.subtitle.trim())) {
+          this.logger.warn(`Dropped sensitive notification text for type ${input.type}`);
+        }
+
         let row: any = null;
         if (persistInApp) {
           row = await this.db.inAppNotification.create({
@@ -152,8 +167,9 @@ export class NotificationInboxService {
               schoolId: input.schoolId ?? null,
               role: input.role ?? null,
               type: input.type,
-              title: input.title,
-              body: input.body,
+              title,
+              subtitle: subtitle || null,
+              body,
               link: input.link ?? null,
               metadata: input.metadata ?? undefined,
             },
@@ -168,6 +184,7 @@ export class NotificationInboxService {
               role: row.role,
               type: row.type,
               title: row.title,
+              subtitle: row.subtitle ?? null,
               body: row.body,
               link: row.link,
               metadata: row.metadata,
@@ -180,8 +197,8 @@ export class NotificationInboxService {
 
         if (sendPush) {
           void this.sendPushToUser(input.userId, {
-            title: input.title,
-            body: input.body,
+            title,
+            body: subtitle || '',
             link: input.link,
             type: input.type,
             notificationId: row?.id ?? `skip-inapp-${Date.now()}`,
@@ -224,6 +241,7 @@ export class NotificationInboxService {
         role: n.role,
         type: n.type,
         title: n.title,
+        subtitle: n.subtitle ?? null,
         body: n.body,
         link: n.link,
         metadata: n.metadata,

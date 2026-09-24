@@ -645,6 +645,8 @@ export class AssessmentsService {
                 subjectName: subject?.name || 'Unknown Subject',
                 assessmentId,
                 submissionId: submission.id,
+                classId: assessment.classId || undefined,
+                classArmId: assessment.classArmId || undefined,
                 timestamp: new Date().toISOString(),
             });
         } catch (notifErr) {

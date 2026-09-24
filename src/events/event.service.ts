@@ -109,32 +109,35 @@ export class EventService {
     try {
       const members = await this.notificationInbox?.getAllSchoolMemberUserIds(school.id);
       if (members) {
+        const when = new Date(event.startDate).toLocaleDateString('en-GB', {
+          day: 'numeric',
+          month: 'short',
+          year: 'numeric',
+        });
+        const notice = {
+          type: 'EVENT_CREATED',
+          title: 'New event',
+          subtitle: event.title,
+          body: `${event.title} is on ${when}.`,
+          metadata: { eventId: event.id },
+        };
         void this.notificationService?.notifyUsers(members.admins, {
           schoolId: school.id,
           role: 'SCHOOL_ADMIN',
-          type: 'EVENT_CREATED',
-          title: 'New calendar event',
-          body: event.title,
+          ...notice,
           link: '/dashboard/school/calendar',
-          metadata: { eventId: event.id },
         });
         void this.notificationService?.notifyUsers(members.teachers, {
           schoolId: school.id,
           role: 'TEACHER',
-          type: 'EVENT_CREATED',
-          title: 'New calendar event',
-          body: event.title,
+          ...notice,
           link: '/dashboard/teacher/calendar',
-          metadata: { eventId: event.id },
         });
         void this.notificationService?.notifyUsers(members.students, {
           schoolId: school.id,
           role: 'STUDENT',
-          type: 'EVENT_CREATED',
-          title: 'New calendar event',
-          body: event.title,
+          ...notice,
           link: '/dashboard/student/calendar',
-          metadata: { eventId: event.id },
         });
       }
     } catch {

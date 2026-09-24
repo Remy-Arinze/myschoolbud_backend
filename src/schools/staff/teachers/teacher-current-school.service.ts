@@ -209,7 +209,9 @@ export class TeacherCurrentSchoolService {
       },
     });
 
-    const isPrimaryTeacher = classTeacherAssignment?.isPrimary || false;
+    // Secondary form teachers are class charge, not graders of every subject.
+    const isPrimaryTeacher =
+      schoolType === 'PRIMARY' && (classTeacherAssignment?.isPrimary || false);
 
     // For PRIMARY school class teachers - they can grade ALL subjects for that class level
     if (schoolType === 'PRIMARY' && isPrimaryTeacher && classLevelId) {

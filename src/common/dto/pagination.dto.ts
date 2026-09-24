@@ -1,4 +1,4 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { IsOptional, IsInt, Min, Max } from 'class-validator';
 
@@ -49,6 +49,21 @@ export class PaginationDto {
   filter?: 'all' | 'active' | 'inactive' = 'all';
 }
 
+/** Full-list account status totals. These are not limited to the current page. */
+export class AccountStatusCountsDto {
+  @ApiProperty({ description: 'Accounts with status ACTIVE' })
+  active: number;
+
+  @ApiProperty({ description: 'Accounts with status SHADOW (invited, not yet activated)' })
+  pending: number;
+
+  @ApiProperty({ description: 'Accounts with status SUSPENDED' })
+  suspended: number;
+
+  @ApiProperty({ description: 'Accounts with status ARCHIVED' })
+  archived: number;
+}
+
 export class PaginatedResponseDto<T> {
   @ApiProperty({ description: 'Array of items' })
   data: T[];
@@ -70,4 +85,10 @@ export class PaginatedResponseDto<T> {
 
   @ApiProperty({ description: 'Whether there is a previous page' })
   hasPrev: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Status totals for the full filtered set, not the current page',
+    type: AccountStatusCountsDto,
+  })
+  statusCounts?: AccountStatusCountsDto;
 }

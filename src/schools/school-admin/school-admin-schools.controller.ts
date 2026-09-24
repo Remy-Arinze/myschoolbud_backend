@@ -161,6 +161,12 @@ export class SchoolAdminSchoolsController {
     type: String,
     description: 'Filter by school type (PRIMARY, SECONDARY, TERTIARY)',
   })
+  @ApiQuery({
+    name: 'status',
+    required: false,
+    enum: ['active', 'pending', 'suspended'],
+    description: 'Filter the list by account status. KPI counts ignore this filter.',
+  })
   @ApiResponse({
     status: 200,
     description: 'Staff list retrieved successfully',
@@ -172,7 +178,8 @@ export class SchoolAdminSchoolsController {
     @Query('limit') limit?: string,
     @Query('search') search?: string,
     @Query('role') role?: string,
-    @Query('schoolType') schoolType?: string
+    @Query('schoolType') schoolType?: string,
+    @Query('status') status?: 'active' | 'pending' | 'suspended',
   ): Promise<ResponseDto<StaffListResponseDto>> {
     const query = {
       page: page ? parseInt(page, 10) : undefined,
@@ -180,6 +187,7 @@ export class SchoolAdminSchoolsController {
       search,
       role,
       schoolType,
+      status,
     };
     const data = await this.schoolAdminSchoolsService.getStaffList(req.user, query);
     return ResponseDto.ok(data, 'Staff list retrieved successfully');

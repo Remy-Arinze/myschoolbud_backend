@@ -143,8 +143,14 @@ export class SchoolStudentAdmissionController {
     @Param('schoolId') schoolId: string,
     @Query() query: GetStudentsDto
   ): Promise<ResponseDto<PaginatedResponseDto<StudentWithEnrollmentDto>>> {
-    const { schoolType, search, ...pagination } = query;
-    const data = await this.studentsService.findAll(schoolId, pagination, schoolType, search);
+    const { schoolType, search, status, ...pagination } = query;
+    const data = await this.studentsService.findAll(
+      schoolId,
+      pagination,
+      schoolType,
+      search,
+      status,
+    );
     return ResponseDto.ok(data, 'Students retrieved successfully');
   }
 

@@ -131,29 +131,30 @@ export class AiAgentToolsService {
         });
 
       case 'generate_quiz': {
+        const prepared = await this.prepareSchemeAssessment(args, context, 'QUIZ');
+        if (prepared.halted === true) return prepared.halt;
+        const topicLine = prepared.weeks.map((week) => `Week ${week.weekNumber}: ${week.topic}`).join('; ');
         const res = await this.generators.generateQuiz({
-          topic: args.topic || 'Quick Quiz',
-          subject: args.subject || 'General',
-          gradeLevel: args.gradeLevel || 'Any',
+          topic: topicLine || args.topic || 'Quick Quiz',
+          subject: prepared.subjectName,
+          gradeLevel: prepared.className || args.gradeLevel || 'Any',
           questionCount: args.questionCount || 5,
           questionTypes: args.questionTypes || ['multiple_choice'],
           difficulty: args.difficulty || 'medium',
         });
-
-        if (context?.schoolId && args.subject) {
-          const subject = await this.prisma.subject.findFirst({
-            where: {
-              schoolId: context.schoolId,
-              name: { contains: args.subject, mode: 'insensitive' },
-              isActive: true,
-            },
-            select: { id: true },
-          });
-          if (subject) {
-            (res.data as any).subjectId = subject.id;
-          }
-        }
-        return res;
+        return {
+          data: {
+            questions: res.data,
+            title: args.topic || 'Quiz',
+            subject: prepared.subjectName,
+            subjectId: prepared.subjectId,
+            classId: prepared.classId,
+            className: prepared.className,
+            type: 'QUIZ',
+            gradeLevel: prepared.className,
+          },
+          usage: res.usage,
+        };
       }
 
       case 'generate_flashcards':
@@ -172,29 +173,34 @@ export class AiAgentToolsService {
         });
 
       case 'generate_assessment': {
+        const kind = String(args.assessmentType || '').toUpperCase() === 'EXAM' ? 'EXAM' : 'ASSIGNMENT';
+        const prepared = await this.prepareSchemeAssessment(args, context, kind);
+        if (prepared.halted === true) return prepared.halt;
         const res = await this.generators.generateAssessmentQuestions({
-          topic: args.topic || 'Assessment',
-          subject: args.subject || 'General',
-          gradeLevel: args.gradeLevel || 'Any',
-          questionCount: args.questionCount || 20,
-          questionTypes: args.questionTypes || ['multiple_choice', 'short_answer', 'essay'],
+          topic: args.topic || kind,
+          subject: prepared.subjectName,
+          gradeLevel: prepared.className || args.gradeLevel || 'Any',
+          questionCount: args.questionCount || 5,
+          questionTypes: args.questionTypes || ['multiple_choice', 'short_answer'],
           difficulty: args.difficulty || 'mixed',
+          gradeType: kind,
+          weeks: prepared.weeks,
         });
-
-        if (context?.schoolId && args.subject) {
-          const subject = await this.prisma.subject.findFirst({
-            where: {
-              schoolId: context.schoolId,
-              name: { contains: args.subject, mode: 'insensitive' },
-              isActive: true,
-            },
-            select: { id: true },
-          });
-          if (subject) {
-            (res.data as any).subjectId = subject.id;
-          }
-        }
-        return res;
+        const questions = Array.isArray(res.data) ? res.data : [];
+        return {
+          data: {
+            questions,
+            title: args.topic || kind,
+            subject: prepared.subjectName,
+            gradeLevel: prepared.className || args.gradeLevel || '',
+            subjectId: prepared.subjectId,
+            classId: prepared.classId,
+            className: prepared.className,
+            type: kind,
+            dueDate: prepared.examDate,
+          },
+          usage: res.usage,
+        };
       }
 
       case 'grade_essay':
@@ -510,5 +516,212 @@ export class AiAgentToolsService {
       usage: null,
       sources: [toolSource('get_school_stats', 'Live school counts', '/dashboard/school/overview')],
     };
+  }
+
+  /**
+   * Scheme and exam-timetable gate. No questions until the teacher picks a scope,
+   * and none at all when the scheme or the exam slot is missing.
+   */
+  private async prepareSchemeAssessment(
+    args: any,
+    context: AgentToolContext | undefined,
+    kind: 'QUIZ' | 'ASSIGNMENT' | 'EXAM',
+  ): Promise<
+    | { halted: true; halt: { data: Record<string, unknown>; usage: null } }
+    | {
+        halted: false;
+        classId: string;
+        className: string;
+        subjectId: string;
+        subjectName: string;
+        weeks: Array<{ weekNumber: number; topic: string; learningOutcomes: string[]; assessmentType?: string }>;
+        examDate?: string;
+      }
+  > {
+    const halt = (message: string, extra: Record<string, unknown> = {}) => ({
+      halted: true as const,
+      halt: { data: { blocked: true, message, ...extra }, usage: null as null },
+    });
+
+    if (!context?.schoolId) return halt('This assessment needs a school.');
+
+    const matched = await this.matchTeacherClass(context, args.className || args.gradeLevel);
+    if (!matched) {
+      return halt('Name the class arm, for example JSS 2 A, before I write questions.');
+    }
+
+    const wantedSubject = String(args.subject || '').trim();
+    const subject =
+      (await this.prisma.subject.findFirst({
+        where: {
+          schoolId: context.schoolId,
+          isActive: true,
+          name: { equals: wantedSubject, mode: 'insensitive' },
+        },
+        select: { id: true, name: true },
+      })) ||
+      (await this.prisma.subject.findFirst({
+        where: {
+          schoolId: context.schoolId,
+          isActive: true,
+          name: { contains: wantedSubject, mode: 'insensitive' },
+        },
+        select: { id: true, name: true },
+      }));
+    if (!subject) return halt('That subject is not on this school.');
+
+    const arm = await this.prisma.classArm.findFirst({
+      where: { id: matched.id, classLevel: { schoolId: context.schoolId } },
+      select: { id: true, classLevelId: true, classLevel: { select: { type: true } } },
+    });
+    if (!arm) return halt('That class is not on this school.');
+
+    const session = await this.prisma.academicSession.findFirst({
+      where: {
+        schoolId: context.schoolId,
+        status: 'ACTIVE',
+        schoolType: arm.classLevel.type,
+      },
+      include: { terms: { where: { status: 'ACTIVE' }, take: 1 } },
+    });
+    const term = session?.terms[0];
+    if (!term) return halt('There is no active term for this class.');
+
+    let examDate: string | undefined;
+    if (kind === 'EXAM') {
+      const slot = term.examTimetablePublishedAt
+        ? await this.prisma.examTimetableSlot.findFirst({
+            where: { termId: term.id, subjectId: subject.id, classArmId: arm.id },
+            orderBy: { examDate: 'asc' },
+          })
+        : null;
+      if (!slot) {
+        return halt('The exam timetable is not published for this class and subject.');
+      }
+      examDate = slot.examDate.toISOString().slice(0, 10);
+    }
+
+    const schemes = await this.prisma.schemeOfWork.findMany({
+      where: {
+        schoolId: context.schoolId,
+        termId: term.id,
+        subjectId: subject.id,
+        status: 'PUBLISHED',
+        OR: [
+          { classArmId: arm.id },
+          ...(arm.classLevelId ? [{ classLevelId: arm.classLevelId, classArmId: null }] : []),
+        ],
+      },
+      include: { weeks: { orderBy: { weekNumber: 'asc' as const } } },
+      orderBy: { updatedAt: 'desc' },
+    });
+    const scheme = schemes.find((row) => row.classArmId === arm.id) || schemes[0];
+    if (!scheme || scheme.weeks.length === 0) {
+      const teacher = context.userRole === 'TEACHER';
+      return halt(
+        `The scheme of work is not published for ${matched.name} ${subject.name}, so I can't write this from the scheme. Use manual assessment creation instead. Open this class's assessments from the link on the card.`,
+        {
+          reason: 'scheme_unpublished',
+          className: matched.name,
+          subjectName: subject.name,
+          ...(teacher
+            ? {
+                assessmentsPath: `/dashboard/teacher/classes/${matched.id}?tab=assessments`,
+                manualPath: `/dashboard/teacher/assessments/new?source=manual&classId=${matched.id}`,
+              }
+            : {}),
+        },
+      );
+    }
+
+    const deliveredIds = new Set(
+      (
+        await this.prisma.schemeOfWorkWeekDelivery.findMany({
+          where: {
+            classArmId: arm.id,
+            status: 'DELIVERED',
+            weekId: { in: scheme.weeks.map((week) => week.id) },
+          },
+          select: { weekId: true },
+        })
+      ).map((row) => row.weekId),
+    );
+    const taught = scheme.weeks.filter((week) => week.isDelivered || deliveredIds.has(week.id));
+    const scope = String(args.scope || '').toLowerCase();
+    if (scope !== 'delivered' && scope !== 'all') {
+      return halt('Use the weeks already taught, or the whole scheme? I will write the questions after you choose.', {
+        needsScope: true,
+        deliveredWeeks: taught.map((week) => week.weekNumber),
+        schemeWeeks: scheme.weeks.map((week) => week.weekNumber),
+      });
+    }
+
+    const chosen = scope === 'delivered' ? taught : scheme.weeks;
+    if (chosen.length === 0) {
+      return halt('No weeks have been marked taught yet. Say if I should use the whole scheme.');
+    }
+
+    return {
+      halted: false,
+      classId: matched.id,
+      className: matched.name,
+      subjectId: subject.id,
+      subjectName: subject.name,
+      examDate,
+      weeks: chosen.map((week) => ({
+        weekNumber: week.weekNumber,
+        topic: week.topic,
+        learningOutcomes: week.learningOutcomes,
+        assessmentType: week.assessmentType || undefined,
+      })),
+    };
+  }
+
+  /** Match a named arm ("JSS 2 A") to one of this teacher's classes. Several matches stay unresolved. */
+  private async matchTeacherClass(
+    context: AgentToolContext | undefined,
+    label?: string,
+  ): Promise<{ id: string; name: string } | null> {
+    const query = (label || '').trim();
+    if (!query || !context?.schoolId || !context.userId) return null;
+
+    const teacher = await this.prisma.teacher.findFirst({
+      where: { userId: context.userId, schoolId: context.schoolId },
+      select: { id: true },
+    });
+    if (!teacher) return null;
+
+    const [assignments, periods] = await Promise.all([
+      this.prisma.classTeacher.findMany({
+        where: { teacherId: teacher.id, classArmId: { not: null } },
+        select: {
+          classArm: { select: { id: true, name: true, classLevel: { select: { name: true } } } },
+        },
+      }),
+      this.prisma.timetablePeriod.findMany({
+        where: { teacherId: teacher.id, classArmId: { not: null } },
+        select: {
+          classArmId: true,
+          classArm: { select: { id: true, name: true, classLevel: { select: { name: true } } } },
+        },
+        distinct: ['classArmId'],
+      }),
+    ]);
+
+    const classes = new Map<string, { id: string; name: string }>();
+    for (const row of [...assignments, ...periods]) {
+      const arm = row.classArm;
+      if (!arm) continue;
+      classes.set(arm.id, { id: arm.id, name: `${arm.classLevel.name} ${arm.name}`.trim() });
+    }
+
+    const compact = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, '');
+    const needle = compact(query);
+    if (!needle) return null;
+    const list = [...classes.values()];
+    const exact = list.filter((c) => compact(c.name) === needle);
+    if (exact.length === 1) return exact[0];
+    const partial = list.filter((c) => compact(c.name).includes(needle) || needle.includes(compact(c.name)));
+    return partial.length === 1 ? partial[0] : null;
   }
 }
